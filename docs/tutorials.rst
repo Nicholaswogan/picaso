@@ -65,14 +65,15 @@ Relevant Citatons: `Mukherjee et al. 2022 <https://ui.adsabs.harvard.edu/abs/202
    Planet </notebooks/climate/12b_Exoplanet.ipynb>
    Brown Dwarfs w/ Disequilibrium Chemistry </notebooks/climate/12c_BrownDwarf_DEQ.ipynb>
 
-Fitting models to data
+Generating models and fitting them to data.
 ----------------------
 Relevant Citatons: `JWST Transiting Exoplanet Community Early Release Science Team (2022) <https://www.nature.com/articles/s41586-022-05269-w>`_
 
 .. toctree::
    :maxdepth: 1
 
-   Grid Search Analysis </notebooks/fitdata/GridSearch.ipynb>
+   Generating models </notebooks/fitdata/GridSearch.ipynb>
+   Fitting models to data </notebooks/fitdata/GridSearch.ipynb>
 
 
 Model Storage & Reuse
