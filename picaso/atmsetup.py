@@ -254,10 +254,15 @@ class ATMSETUP():
         if  ("N2" in simple_names):
             self.continuum_molecules += [['N2','N2']]
         if  ("CO2" in simple_names):
-            self.continuum_molecules += [['CO2','CO2']]      
+            self.continuum_molecules += [['CO2','CO2']]
+        if  ("H2O" in simple_names):
+            self.continuum_molecules += [['H2O','H2O']]
+        if ("H2O" in simple_names) and ("N2" in simple_names):
+            self.continuum_molecules += [['H2O','N2']]
+        if ("N2" in simple_names) and ("O2" in simple_names):
+            self.continuum_molecules += [['N2','O2']]
         if  ("O2" in simple_names):
             self.continuum_molecules += [['O2','O2']]    
-
         if ("H-" in simple_names):
             self.continuum_molecules += [['H-','bf']]
         if ("H" in simple_names) and ("electrons" in self.level.keys()):
