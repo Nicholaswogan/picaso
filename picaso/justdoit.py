@@ -3785,8 +3785,8 @@ class inputs():
         self.inputs['climate']['photochem'] = photochem
         if self.inputs['climate']['photochem']:
             # Import and initialize the photochemical code.
-            from .photochem import EvoAtmosphereGasGiant
-            self.inputs['climate']['pc'] = EvoAtmosphereGasGiant(**photochem_init_args)
+            from .photochem import EvoAtmosphereGasGiantPicaso
+            self.inputs['climate']['pc'] = EvoAtmosphereGasGiantPicaso(**photochem_init_args)
 
     def climate(self, opacityclass, save_all_profiles = False, as_dict=True,with_spec=False,
         save_all_kzz = False, diseq_chem = False, self_consistent_kzz =False, kz = None, 
@@ -3824,8 +3824,6 @@ class inputs():
         min_temp = min(opacityclass.temps)
         max_temp = max(opacityclass.temps)
 
-        
-        
         # first calculate the BB grid
         ntmps = self.inputs['climate']['ntemp_bb_grid']
         dt = self.inputs['climate']['dt_bb_grid']
