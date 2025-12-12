@@ -304,7 +304,7 @@ class EquilibriumChemistry(ChemEquiAnalysis):
         # Set the composition
         self.molfracs_atoms_sun = molfracs_atoms_sun
 
-    def equilibrate_atmosphere(self, P, T, log10mh, CtoO_absolute):
+    def equilibrate_atmosphere(self, P, T, log10mh, CtoO_relative):
         """Solve for equilibrium chemistry across a vertical profile.
 
         Parameters
@@ -315,8 +315,8 @@ class EquilibriumChemistry(ChemEquiAnalysis):
             Temperatures in Kelvin aligned with `P`.
         log10mh : float
             log10 metallicity relative to solar.
-        CtoO_absolute : float
-            Absolute C/O ratio to target.
+        CtoO_relative : float
+            C/O relative to solar.
 
         Returns
         -------
@@ -334,10 +334,6 @@ class EquilibriumChemistry(ChemEquiAnalysis):
         # Some conversions
         P_cgs = P*1e6
         metallicity = 10.0**log10mh
-        indC = self.atoms_names.index('C')
-        indO = self.atoms_names.index('O')
-        CtoO_solar = self.molfracs_atoms_sun[indC]/self.molfracs_atoms_sun[indO]
-        CtoO_relative = CtoO_absolute/CtoO_solar
 
         gas_names = self.gas_names
         condensate_names = self.condensate_names

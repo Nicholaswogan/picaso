@@ -1911,175 +1911,193 @@ class inputs():
         self.inputs['star']['f_unit'] = f_unit 
 
 
-    def atmosphere(self, df=None, filename=None, exclude_mol=None, 
-        mh=None, cto_absolute=None, cto_relative=None, chem_method=None,
-        #for now the next line is only climate params 
-        quench=False,no_ph3=False,cold_trap=False,vol_rainout=False,
-        #these only used for photochem climate 
-        photochem_init_args=None,add_visscher_abunds = True,
-        **pd_kwargs):
+    def atmosphere(
+        self, df=None, filename=None, exclude_mol=None, 
+        mh=None, cto_relative=None, chem_method=None,
+        quench=False, no_ph3=False, cold_trap=False, vol_rainout=False, # Climate params 
+        photochem_init_args=None, # needed for Photochem
+        **pd_kwargs
+        ):
         """
-        Builds a dataframe and makes sure that minimum necessary parameters have been suplied.
-        Sets number of layers in model.  
+        Build a DataFrame and ensure the minimum required parameters are supplied.
+        Sets the number of layers in the model.
 
         Parameters
         ----------
-        df : pandas.DataFrame or dict
-            (Optional) Dataframe with volume mixing ratios and pressure, temperature profile. 
-            Must contain pressure (bars) at least one molecule
+        df : pandas.DataFrame or dict, optional
+            DataFrame with pressure (bar), temperature (K), and volume mixing ratios.
+            Must contain pressure and at least one molecule.
         filename : str 
-            (Optional) Filename with pressure, temperature and volume mixing ratios.
-            Must contain pressure at least one molecule
+            Filename with pressure, temperature, and volume mixing ratios.
+            Must contain pressure and at least one molecule.
         exclude_mol : list of str 
             (Optional) List of molecules to ignore from opacity. It will NOT 
             change other aspects of the calculation like mean molecular weight. 
-            This should be used as exploratory ONLY. if you actually want to remove 
-            the contribution of a molecule entirely from your profile you should remove 
-            it from your input data frame. 
+            This should be used for exploration only. To remove a molecule entirely,
+            drop it from the input DataFrame.
         mh : float 
-            Metallicity relative to Solar 
+            Metallicity relative to Solar. 
         cto_relative : float 
-            Carbon-to-Oxygen Ratio relative to Solar (Solar value is determined by `chem_method`)
-        cto_absolute : float
-            Carbon-to-Oxygen Ratio in absolute terms (e.g. 0.55)
+            Carbon-to-oxygen ratio relative to Solar (Solar value is determined by `chem_method`).
         chem_method : str 
             Current options: 
-            - 'visscher' : uses the 2121 chemical equilibrium tables computed by Channon Visscher via the function `chemeq_visscher`
-                if 'visscher' needs to input: mh and cto 
-            - 'visscher_1060' : uses the chemical equilibrium tables computed by Channon Visscher on the 1060 grid via the function `chemeq_visscher`
-                if 'visscher' needs to input: mh and cto 
-            - 'photochem' : users photochem model by Nick Wogan
-                if 'photochem' user needs to input photochem_init_args and photochem_TOA_pressure
-            - 'on-the-fly' : Computes equilibrium chemistry on-the-fly with the equilibrium solver in `Photochem`.
+            - 'visscher': 2121 chemical equilibrium tables via `chemeq_visscher_2121`
+              (requires `mh` and C/O)
+            - 'visscher_1060': 1060-grid equilibrium tables via `chemeq_visscher_1060`
+              (requires `mh` and C/O)
+            - 'on-the-fly': equilibrium chemistry solved on-the-fly.
+            - 'photochem': A steady-state photochem model for main volatiles (e.g., H, N, O, C, S) 
+              and 'on-the-fly' equilibrium chemistry for volatiles containing K, Si, Fe, etc.
+              (requires `photochem_init_args`)
         quench : bool 
-            Climate only, default = False: no quencing
+            Climate only, default False: no quenching.
         no_ph3 : bool 
-            Climate only chem hack, default=False: True removes any PH3 from the atmosphere 
+            Climate-only chem hack, default False: True removes any PH3 from the atmosphere. 
         cold_trap : bool 
-            Climate only chem hack, default=False: Force H2O and NH3 abundances to be cold trapped after condensation.
-        vol_rainint : bool ;
-            Climate only chem hack, default=False: will rainout volatiles like H2O, CH4 and NH3 in diseq runs as in equilibrium model when applicable
+            Climate-only chem hack, default False: force H2O and NH3 abundances to be cold trapped after condensation.
+        vol_rainout : bool
+            Climate-only chem hack, default False: rain out volatiles (H2O, CH4, NH3) in disequilibrium runs as in equilibrium when applicable.
         photochem_init_args : dict
-            Dictionary containing initialization arguments for photochem. Should contain the following keys
+            Dictionary containing initialization arguments for photochem. Should contain:
             - "mechanism_file" : str
-                Path to the file describing the reaction mechanism
+                Path to the file describing the reaction mechanism.
             - "stellar_flux_file" : str
                 Path to the file describing the stellar UV flux.
             - "planet_mass" : float
-                Planet mass in grams
+                Planet mass in grams.
             - "planet_radius" : float
-                Planet radius in cm
+                Planet radius in cm.
             - "nz" : int, optional
-                The number of layers in the photochemical model, by default 100
+                Number of layers in the photochemical model, by default 100.
             - "P_ref" : float, optional
-                Pressure level corresponding to the planet_radius, by default 1e6 dynes/cm^2
+                Pressure level corresponding to the planet_radius, by default 1e6 dynes/cm^2.
+                Units must be in dynes/cm^2.
             - "thermo_file" : str, optional
                 Optionally include a dedicated thermodynamic file.
             - "TOA_pressure" : float
-            Pressure at the top of the atmosphere for photochem, by default 1e-7 bar. Unit must be in dynes/cm^2
-        add_visscher_abunds : bool 
-            Default = False; Only used for photochemical results. Adds visscher to fill gaps covered by the photochemical mdoel 
+                Pressure at the top of the atmosphere for photochem, by default 0.1 dynes/cm^2.
+                Units must be in dynes/cm^2.
         verbose : bool 
-            (Optional) prints out warnings. Default set to True
+            (Optional) Print warnings. Default True.
         pd_kwargs : kwargs 
-            Key word arguments for pd.read_csv to read in supplied atmosphere file 
+            Keyword arguments forwarded to `pd.read_csv` when reading the supplied atmosphere file. 
         """        
         
-        #if a dataframe was input lets check it out and set nlevels
-        if not isinstance(df, type(None)):
-            if ((not isinstance(df, dict )) & (not isinstance(df, pd.core.frame.DataFrame ))): 
+        if df is not None:
+            # If a dataframe was input lets check it out and set nlevels
+            if not isinstance(df, dict) and not isinstance(df, pd.DataFrame): 
                 raise Exception("df must be pandas DataFrame or dictionary")
-            else:
-                self.nlevel=df.shape[0] 
-        #if a filename was input lets read it and set nlevels
-        elif not isinstance(filename, type(None)):
+            if isinstance(df, dict):
+                df = pd.DataFrame(df)
+            self.nlevel = df.shape[0] 
+        elif filename is not None:
+            # If a filename was input lets read it and set nlevels
             df = pd.read_csv(filename, **pd_kwargs)
-            self.nlevel=df.shape[0] 
-        
-        #if we already have a dataframe in here let's just define df as is assume the user wants to modify chem with only a PT
-        elif isinstance(self.inputs['atmosphere']['profile'] ,pd.core.frame.DataFrame ): 
+            self.nlevel = df.shape[0] 
+        elif isinstance(self.inputs['atmosphere']['profile'], pd.DataFrame): 
+            # If we already have a dataframe in here let's just define df as is 
+            # assume the user wants to modify chem with only a PT
             df = self.inputs['atmosphere']['profile']
         else:
             if 'climate' in self.inputs['calculation']:
-                raise("Could not find a starting dataframe in inputs['atmosphere']['profile']. You are running a climate model so this dataframe is usually initialized in inputs_climate() function that needs a temp_guess and pressure_guess. You can also use the function add_PT() or set it yourself manually. ")
+                raise Exception(
+                    "Could not find a starting dataframe in inputs['atmosphere']['profile']. " 
+                    "You are running a climate model so this dataframe is usually initialized "
+                    "in inputs_climate() function that needs a temp_guess and pressure_guess. " 
+                    "You can also use the function add_PT() or set it yourself manually. "
+                    )
             else:
-                raise Exception("Could not find a starting dataframe in inputs['atmosphere']['profile'] and no df or filename were specified")
+                raise Exception(
+                    "Could not find a starting dataframe in inputs['atmosphere']['profile'] "
+                    "and no df or filename were specified"
+                    )
 
-        #if we dont have pressure in the dataframe its a full stop. 
-        if 'pressure' not in df.keys(): 
-            raise Exception("Check column names. `pressure` must be included. For climate runs set your initial guess in `inputs_climate` before running atmosphere class to set the chemistry")
+        # If we dont have pressure in the dataframe its a full stop. 
+        if 'pressure' not in df: 
+            raise Exception(
+                "Check column names. `pressure` must be included. For climate runs " 
+                "set your initial guess in `inputs_climate` before running atmosphere " 
+                "class to set the chemistry"
+                )
         
-        #if we dont have temperature that might be okay.. this means its a climate model and we dont have a T
-        if ('temperature' not in df.keys()):
-            #if its not a climate calculation, then full stop
-            if 'climate' not in self.inputs['calculation']:
-                raise Exception("`temperature` not specified as a column/key name")
+        # If we dont have temperature that might be okay. This means its a climate model and we dont have a T.
+        if 'temperature' not in df and 'climate' not in self.inputs['calculation']:
+            raise Exception("`temperature` not specified as a column/key name")
 
-        # if there ar molecules we want to exclude lets make sure they are in list format
-        if not isinstance(exclude_mol, type(None)):
-            if  isinstance(exclude_mol, str):
+        # If there are molecules we want to exclude lets make sure they are in list format
+        if exclude_mol is not None:
+            if isinstance(exclude_mol, str):
                 exclude_mol = [exclude_mol]
             
-            #now lets transfer to a dictionary for each molecule the user has chosen
-            #this way we can flip them on and off individually
-            self.inputs['atmosphere']['exclude_mol'] = {i:1 for i in df.keys()}
+            # Now lets transfer to a dictionary for each molecule the user has chosen
+            # this way we can flip them on and off individually
+            self.inputs['atmosphere']['exclude_mol'] = {i: 1 for i in df}
             for i in exclude_mol: 
-                self.inputs['atmosphere']['exclude_mol'][i]=0
+                self.inputs['atmosphere']['exclude_mol'][i] = 0
         else: 
             self.inputs['atmosphere']['exclude_mol'] = 1
 
-        #sort by pressure to make sure 0 index is low pressure, last index is high pressure
+        # Sort by pressure to make sure 0 index is low pressure, last index is high pressure
         self.inputs['atmosphere']['profile'] = df.sort_values('pressure').reset_index(drop=True)
 
-        #lastly check to see if the atmosphere is non-H2 dominant. 
-        #if it is, let's turn off Raman scattering for the user. 
-        if df.shape[1]>2:
-            if (("H2" not in df.keys()) and (self.inputs['approx']['rt_params']['common']['raman'] != 2)):
+        # Lastly check to see if the atmosphere is non-H2 dominant. 
+        # if it is, let's turn off Raman scattering for the user. 
+        if df.shape[1] > 2 and self.inputs['approx']['rt_params']['common']['raman'] != 2:
+            if "H2" not in df:
                 self.inputs['approx']['rt_params']['common']['raman'] = 2
-            elif (("H2" in df.keys()) and (self.inputs['approx']['rt_params']['common']['raman'] != 2)): 
-                if df['H2'].min() < 0.7: 
+            else:
+                if df['H2'].min() < 0.7:
                     self.inputs['approx']['rt_params']['common']['raman'] = 2
 
-        #now, if mh and cto were supplied lets add those to inputs and set the chem method requestd 
-        if (mh != None ):
+        if chem_method is not None:
+            if not isinstance(chem_method, str):
+                raise Exception('chem_method must be of type str')
+            if mh is None:
+                raise Exception("Specify mh when chem_method is set")
+            if cto_relative is None:
+                raise Exception("Specify cto_relative when chem_method is set")
+            
+            if chem_method == 'photochem':
+                if photochem_init_args is None:
+                    raise Exception("Specify photochem_init_args when chem_method is set to 'photochem'.")
+                self.inputs['atmosphere']['photochem_init_args'] = photochem_init_args
+            else:
+                if photochem_init_args is not None:
+                    raise Exception("photochem_init_args were provided but chem_method is not set to 'photochem'.")
+
             self.inputs['atmosphere']['mh'] = mh 
-            if ((cto_absolute == None) and isinstance(cto_relative, (float,int))): 
-                cto_absolute=cto_relative*0.549
-            elif (cto_relative ==None and isinstance(cto_absolute, (float,int))): 
-                cto_relative = cto_absolute/0.549 #such that if user did c/o=1, then cto=0.549
-            elif 'cto' in pd_kwargs: 
-                raise Exception('cto is not an acceptance argument. need to input either cto_relative or cto_absolute.')
-            else: 
-                raise Exception('mh was specified but cto_relative or cto_absolute was not. need to input one of these. ')
             self.inputs['atmosphere']['cto_relative'] = cto_relative 
-            self.inputs['atmosphere']['cto_absolute'] = cto_absolute 
             self.inputs['approx']['chem_method'] = chem_method
-        
-        #add photochem initialization if it exists 
-        if photochem_init_args!=None: 
-            self.inputs['atmosphere']['photochem_init_args'] = photochem_init_args 
-            if add_visscher_abunds: 
-                #if we also want visscher then we can make the chem method "photochem+visccher"
-                self.inputs['approx']['chem_method'] = self.inputs['approx']['chem_method']+'+visscher'
 
-            # sets chemistry options and runs chemistry if the user has input a PT profile
-            # otherwise this just checks for valid inputs 
             self.chemistry_handler()
-
-        #SET ATMOSPHERE APPROXIMATIONS 
-        #if this is not a climate calculation and one of the parameters is True, then braek the code 
-        #TODO: allow users to run these approx for forward models.
-        if (self.inputs['calculation'] != 'climate'):
-            if np.any([ quench,  no_ph3,  cold_trap,  vol_rainout]):
-                raise Exception (f"'quench','no_ph3','cold_trap','vol_rainout' are a climate kwargs and climate calculation is not specified so this will not do anything to the user input chemistry. Please set to false to not avoid confusion. In a later update we could create a portal to these kwargs for the forward modeling.")
+        else: # chem_method is None
+            if mh is not None:
+                raise Exception("mh was provided but chem_method is None; please specify a chemistry method.")
+            if cto_relative is not None:
+                raise Exception("cto_relative was provided but chem_method is None; please specify a chemistry method.")
+            if photochem_init_args is not None:
+                raise Exception("photochem_init_args were provided but chem_method is None; please specify a chemistry method.")
         
-        #if we've made it this far lets just save the approximation params in chem_params
-        self.inputs['approx']['chem_params']=self.inputs['approx'].get('chem_params',{})
-        for ikey,ibool in zip(['quench','no_ph3','cold_trap','vol_rainout'],
-                              [ quench,  no_ph3,  cold_trap,  vol_rainout]):
-            self.inputs['approx']['chem_params'][ikey]=ibool
-
-    def chemistry_handler(self, chemistry_table = None):
+        # Set atmosphere approximations
+        # If this is not a climate calculation and one of the parameters is True, then break the code 
+        # TODO: allow users to run these approx for forward models.
+        if self.inputs['calculation'] != 'climate':
+            if any([quench, no_ph3, cold_trap, vol_rainout]):
+                raise Exception(
+                    "'quench','no_ph3','cold_trap','vol_rainout' are a climate args and" 
+                    "climate calculation is not specified so this will not do anything to" 
+                    "the user input chemistry. Please set to false to not avoid confusion."
+                    "In a later update we could create a portal to these kwargs for the forward modeling."
+                    )
+        
+        # If we've made it this far lets just save the approximation params in chem_params
+        chem_params = self.inputs['approx'].get('chem_params', {})
+        for key, val in zip(['quench','no_ph3','cold_trap','vol_rainout'],
+                            [ quench,  no_ph3,  cold_trap,  vol_rainout]):
+            chem_params[key] = val
+        self.inputs['approx']['chem_params'] = chem_params
+        
+    def chemistry_handler(self, chemistry_table=None):
         """
         This function sets the chemistry table that we want to use, whether it is the 1060, 2121 and if we want to 
         do photohchemistry.
@@ -2089,54 +2107,51 @@ class inputs():
         chemistry_table : str
             Chemistry table type
         """
-        #add default chem method
-        chem_method = self.inputs['approx'].get('chem_method',None)
-        atmosphere_profile = self.inputs['atmosphere']['profile']
+        # Add default chem method
+        chem_method = self.inputs['approx'].get('chem_method')
+        chem_method_str = str(chem_method)
         
-        # Are we running chemistry or just setting inputs ?
+        # Are we running chemistry or just setting inputs?
         # if the user has supplied a T and P we will just assume they want to run chemistry
-
-        if (('temperature' in atmosphere_profile.keys()) & ('pressure' in atmosphere_profile.keys())):
-            run = True 
+        atmosphere_profile = self.inputs['atmosphere']['profile']
+        if 'temperature' in atmosphere_profile and 'pressure' in atmosphere_profile:
+            run = True
         else: 
-            run = False 
+            run = False
 
-        #lets set a bool to see if we find a valid chem method
-        found_method = False
-
-        # Option : simplest method where we just grab visscher abundances 
-        
-        if 'visscher_1060' in str(chem_method):            
-            mh = self.inputs['atmosphere']['mh'] 
-            cto = self.inputs['atmosphere']['cto_relative']   
-            if run: self.chemeq_visscher_1060(cto, np.log10(mh))   
-            found_method = True
-        elif 'visscher' in str(chem_method):  
-            mh = self.inputs['atmosphere']['mh'] 
-            cto = self.inputs['atmosphere']['cto_absolute']   
-            if run: self.chemeq_visscher_2121(cto, np.log10(mh)) 
-            found_method = True
-        elif 'on-the-fly' in str(chem_method):
-            mh = self.inputs['atmosphere']['mh']
-            cto = self.inputs['atmosphere']['cto_absolute']
-            if run: self.chemeq_on_the_fly(cto, np.log10(mh))
-            found_method = True
-
-        if (('photochem' in str(chem_method)) and (self.inputs['climate'].get('pc',0)==0)): 
-            #initialize photochemistry inputs on first time 
+        # Initialize photochem if needed
+        if chem_method_str == 'photochem' and 'pc' not in self.inputs['climate']:
             self.photochem_init()
-            found_method = True
-        
-        # Option : Here the user has supplied a chemistry table and we just need to use the chem_interp function to interpolate on that table
-        # Notes : This method inherently assumes mh and cto since the loaded table is for a single mh/co
-        if not isinstance(chemistry_table, type(None)): 
-            self.inputs['approx']['chem_method'] = 'chemistry table loaded through opannection'
+
+        # If custom chemistry_table is input, then we do interpolation and return
+        if chemistry_table is not None:
+            self.inputs['approx']['chem_method'] = 'chemistry_table'
             if run: self.chem_interp(chemistry_table)
-            found_method=True
-        #Option : No other options so far 
-        elif not found_method: 
-            raise Exception(f"A chem option {chem_method} is not valid. Likely you specified method='resrotrebin' in opannection but did not run `atmosphere()` function after inputs_climate.") 
-    
+            return
+
+        # Check that the chemistry method is valid
+        if chem_method_str not in ['visscher_1060', 'visscher', 'on-the-fly', 'photochem']:
+            raise Exception(
+                f"A chem option {chem_method_str} is not valid. Likely you specified method='resortrebin'"
+                " in opannection but did not run `atmosphere()` function after inputs_climate."
+                ) 
+        
+        # Return if we are not running
+        if not run:
+            return
+
+        # Run chemistry
+        mh = self.inputs['atmosphere'].get('mh')
+        cto_relative = self.inputs['atmosphere'].get('cto_relative')
+        if mh is None or cto_relative is None:
+            raise Exception("mh and cto_relative must be set before running chemistry.")
+        if chem_method_str == 'visscher_1060':            
+            self.chemeq_visscher_1060(cto_relative, np.log10(mh))   
+        elif chem_method_str == 'visscher':  
+            self.chemeq_visscher_2121(cto_relative, np.log10(mh)) 
+        elif chem_method_str == 'on-the-fly' or chem_method_str == 'photochem':
+            self.chemeq_on_the_fly(cto_relative, np.log10(mh))
+
     def volatile_rainout(self,quench_levels,species_to_consider = ['H2O', 'CH4','NH3']):
         """
         Enforces rainout along pvap. So far these are only H2O, CH4 and NH3, since these are the only major species 
@@ -2837,7 +2852,7 @@ class inputs():
             self.chemeq_visscher(c_o=1.0,log_mh=0.0)
         self.inputs['atmosphere']['sonora_filename'] = build_filename
 
-    def chemeq_on_the_fly(self, cto_absolute, log_mh, method='sonora-approx', chemeq_solver_init_args={}):
+    def chemeq_on_the_fly(self, cto_relative, log_mh, method='sonora-approx', chemeq_solver_init_args={}):
         """
         Compute chemical equilibrium abundances for the current pressure–temperature
         profile using the `photochem.EquilibriumChemistry` solver and attach the
@@ -2845,12 +2860,12 @@ class inputs():
 
         Parameters
         ----------
-        cto_absolute : float
-            Absolute carbon-to-oxygen ratio (e.g., 0.55 for solar). Passed directly
+        cto_relative : float
+            Relative carbon-to-oxygen ratio (e.g., 1.0 for solar). Passed directly
             to the equilibrium solver to set elemental abundances.
         log_mh : float
             Base-10 logarithm of the metallicity relative to solar. This value,
-            together with ``cto_absolute``, defines the elemental composition used
+            together with ``cto_relative``, defines the elemental composition used
             in the equilibrium calculation.
         method : str or None, optional
             Equilibrium chemistry approach to use. Default ``'sonora-approx'`` loads the
@@ -2899,13 +2914,13 @@ class inputs():
         solver = self.inputs['climate']['chemeq_solver']
 
         # Solve for equilibrium
-        gases, condensates = solver.equilibrate_atmosphere(P, T, log_mh, cto_absolute)
+        gases, condensates = solver.equilibrate_atmosphere(P, T, log_mh, cto_relative)
         
         # Update the abundances
         for key in gases:
             self.inputs['atmosphere']['profile'][key] = gases[key]
 
-    def chemeq_visscher_2121(self, cto_absolute, log_mh):#, interp_window = 11, interp_poly=2):
+    def chemeq_visscher_2121(self, cto_relative, log_mh):#, interp_window = 11, interp_poly=2):
         """
         Author of Data: Channon Visscher
 
@@ -2984,16 +2999,15 @@ class inputs():
 
         Parameters
         ----------
-        cto_absolute : int 
-            carbon to oxygen ratio absolute units.
-            Solar = 0.55
-        log_mh : int 
+        cto_relative : float 
+            Carbon-to-oxygen ratio relative to solar (1.0 = solar; 0.5 = half solar C/O; 2.0 = twice solar).
+        log_mh : float 
             metallicity (relative to solar)
             Will find the nearest value to 0.0, 0.5, 1.0, 1.5, 1.7, 2.0
             Solar = 0
         """
         target_feh=log_mh
-        target_co=cto_absolute
+        target_co=cto_relative*0.549
         directory = os.path.join(__refdata__,'chemistry','visscher_grid_2121') 
 
         if not os.path.isdir(directory):

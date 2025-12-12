@@ -105,7 +105,7 @@ NH3={value=1e-5,unit='v/v'}
 background={gases=['H2','He'],fraction=5.667} # optional 
 
 [chemistry.visscher]
-cto_absolute=0.55
+cto_relative=1.0
 log_mh=0
 
 [chemistry.userfile]

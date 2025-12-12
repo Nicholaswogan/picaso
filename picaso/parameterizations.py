@@ -435,8 +435,8 @@ class Parameterize():
 
         return vmr
 
-    def chem_visscher(self,cto_absolute, log_mh): 
-        self.picaso.chemeq_visscher_2121(cto_absolute, log_mh)
+    def chem_visscher(self,cto_relative, log_mh): 
+        self.picaso.chemeq_visscher_2121(cto_relative, log_mh)
         return self.picaso.inputs['atmosphere']['profile']
 
     def pt_madhu_seager_09_noinversion(self, alpha_1, alpha_2, P_1, P_3, T_3, beta=0.5):
