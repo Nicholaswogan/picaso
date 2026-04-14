@@ -43,18 +43,18 @@ from matplotlib import pyplot as plt
 # | CIA partners | Includes many rocky-planet relevant CIAs (e.g., CO2-CO2, H2O-H2O, etc.) | Limited CIA set (e.g., H2-H2, H2-He, etc.) |
 # | Temperature coverage | Fewer absorbers, tuned for temperate atmospheres (roughly < 2000 K) | Broader absorber set relevant to hotter atmospheres (roughly < 6000 K) |
 #
-# Below, we create the opacity object:
+# Below, we create two opacities objects, one with small and one with big wavelength ranges:
 
 # %%
 filename_db = os.path.join(jdi.__refdata__, 'opacities', 'opacities_photochem_0.1_250.0_R15000.db')
 
-opacities_reflected_light = jdi.opannection(
-    wave_range=[0.1,2.0], 
+opacities_small = jdi.opannection(
+    wave_range=[0.2, 2.0], 
     filename_db=filename_db
 )
 
-opacities_thermal_emission = jdi.opannection(
-    wave_range=[0.1,250.0], 
+opacities_big = jdi.opannection(
+    wave_range=[0.2, 250.0], 
     filename_db=filename_db
 )
 
@@ -64,7 +64,7 @@ opacities_thermal_emission = jdi.opannection(
 # Here, our goal is to reproduce the spectral calculation from [Robinson & Salvador (2023)](https://doi.org/10.3847/PSJ/acac9a). They used mixing ratio and temperature profiles from the ICRCCM mid-latitude summer sounding for all their calculations, which we load with the cell below.
 
 # %%
-df_earth = pd.read_csv(jdi.earth_icrccm_pt(), sep='\s+')
+df_earth = pd.read_csv(jdi.earth_icrccm_pt(), sep=r'\s+')
 
 
 # %% [markdown]
@@ -72,7 +72,11 @@ df_earth = pd.read_csv(jdi.earth_icrccm_pt(), sep='\s+')
 #
 # ### Reflected light
 #
-# First, we will reproduce the Earth reflected light spectrum in Figure 4 (right panel) of Robinson & Salvador (2023), by mirroring their model setup almost exactly. In their calculation, they use the P-T-composition as described above, as well as as cloud that blends water liquid/ice optical properties. Their setup requires quite a bit of code:
+# First, we will reproduce the Earth reflected light spectrum in Figure 4 (right panel) of Robinson & Salvador (2023), by mirroring their model setup almost exactly. In their calculation, they use the P-T-composition as described above, as well as as cloud that blends water liquid/ice optical properties. 
+#
+# To dupilcate their setup, you must download the folder "hires_opacities" from Ty Robinson's Dropbox: [https://hablabnet.wordpress.com/research/#data-software](https://hablabnet.wordpress.com/research/#data-software). Follow the link, then click "Dropbox" then the "rfast" folder, then download "hires_opacities.zip" and unzip the folder to the same directory as this notebook.
+#
+# The functions below use the cloud mie files in that folder to mirror their setup.
 
 # %%
 def _interp_extrap(x, xp, fp):
@@ -275,10 +279,10 @@ def initialize_earth(
 
 def earth_spectrum_like_rfast(
     opacity,
+    earth,
     df_earth,
     opdir,
     calculation="reflected",
-    initialize_earth_kwargs=None,
     exclude_mol=None,
     R=140,
     cloud_frac=0.5,
@@ -348,25 +352,10 @@ def earth_spectrum_like_rfast(
         ``fpfs_total`` and ``secondary`` is a dict containing any rebinned
         component arrays that were returned.
     """
-    if initialize_earth_kwargs is None:
-        initialize_earth_kwargs = {}
-    else:
-        initialize_earth_kwargs = dict(initialize_earth_kwargs)
-
-    initialize_earth_kwargs.setdefault("opacity", opacity)
-
-    earth = initialize_earth(**initialize_earth_kwargs)
-
+   
     # Set atmosphere
     earth.atmosphere(df=df_earth, exclude_mol=exclude_mol)
-
-    # Compute clear sky spectrum.
-    df_clear = earth.spectrum(opacity, calculation=calculation, full_output=True)
-    if cloud_frac == 0:
-        # Return if cloud_frac is zero
-        wno = df_clear["wavenumber"]
-        return _regrid_picaso_outputs(wno, df_clear, R=R)
-
+    
     # Build a rfast-like cloud
     cloud_df = _build_rfast_like_cloud_df(
         pressure_levels_bar=df_earth["pressure"].values,
@@ -377,41 +366,24 @@ def earth_spectrum_like_rfast(
         tauc0=tauc0,
         lamc0=lamc0,
     )
+    
     # Set the cloud
-    earth.clouds(df=cloud_df)
-
-    # Compute a cloudy spectrum
-    df_cloudy = earth.spectrum(opacity, calculation=calculation, full_output=True)
-
-    # Get weights for clear/cloudy
     weight_clear = 1.0 - cloud_frac
-    weight_cloud = cloud_frac
-
-    # Mix spectra based on weights
-    wno = df_clear["wavenumber"]
-    mixed_output = {"wavenumber": wno}
-    for key in (
-        "albedo",
-        "fpfs_reflected",
-        "thermal",
-        "fpfs_thermal",
-        "fpfs_total",
-        "transit_depth",
-    ):
-        if key in df_clear and key in df_cloudy:
-            mixed_output[key] = (
-                weight_clear * df_clear[key] + weight_cloud * df_cloudy[key]
-            )
-
-    # Return
-    return _regrid_picaso_outputs(wno, mixed_output, R=R)
-
+    earth.clouds(df=cloud_df, do_holes=True, fhole=weight_clear, fthin_cld=0.0)
+    
+    # Compute spectrum
+    df = earth.spectrum(opacity, calculation=calculation, full_output=True)
+    
+    wno = df["wavenumber"]
+    return _regrid_picaso_outputs(wno, df, R=R)
 
 
 # %% [markdown]
 # Lets compute a couple spectra, excluding one molecule at a time, so we can see their contribution.
 
 # %%
+earth = initialize_earth(opacities_small)
+
 exclude_mols = [None, 'H2O', 'CO2', 'CH4', 'O2', 'O3']
 
 res_reflected = {}
@@ -421,7 +393,8 @@ for exclude_mol in exclude_mols:
         key = 'all'
         
     res_reflected[key] = earth_spectrum_like_rfast(
-        opacity=opacities_reflected_light,
+        opacity=opacities_small,
+        earth=earth,
         df_earth=df_earth,
         opdir='hires_opacities',
         exclude_mol=exclude_mol
@@ -456,6 +429,8 @@ plt.show()
 # Now, lets reproduce Figure 5 in Robinson & Salvador (2023). We can simply use the `earth_spectrum_like_rfast`, but this time with the clouds zeroed out, to match the paper.
 
 # %%
+earth = initialize_earth(opacities_big)
+
 exclude_mols = [None, 'H2O', 'CO2', 'CH4', 'O2', 'O3']
 
 res_thermal = {}
@@ -465,7 +440,8 @@ for exclude_mol in exclude_mols:
         key = 'all'
         
     res_thermal[key] = earth_spectrum_like_rfast(
-        opacity=opacities_thermal_emission,
+        opacity=opacities_big,
+        earth=earth,
         df_earth=df_earth,
         opdir='hires_opacities',
         calculation="thermal",
@@ -500,6 +476,8 @@ plt.show()
 # Finally, we reproduce their Figure 6, which is a cloud-free tranmission spectrum of Earth. We do not include any approximation for refraction.
 
 # %%
+earth = initialize_earth(opacities_big)
+
 exclude_mols = [None, 'H2O', 'CO2', 'CH4', 'O2', 'O3']
 
 res_transit = {}
@@ -509,7 +487,8 @@ for exclude_mol in exclude_mols:
         key = 'all'
         
     res_transit[key] = earth_spectrum_like_rfast(
-        opacity=opacities_thermal_emission,
+        opacity=opacities_big,
+        earth=earth,
         df_earth=df_earth,
         opdir='hires_opacities',
         calculation="transmission",
@@ -542,15 +521,3 @@ ax.set_xlabel('Wavelength (microns)')
 ax.legend()
 
 plt.show()
-
-# %% [markdown]
-# ## An approximate Earth in reflected light with Virga clouds
-
-# %%
-earth = initialize_earth(opacities_reflected_light)
-
-# %%
-
-# %%
-
-# %%
