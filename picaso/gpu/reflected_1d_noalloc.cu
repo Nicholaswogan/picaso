@@ -261,7 +261,6 @@ extern "C" __global__ void reflected_prepare_constants_kernel(
     }
 
     for (int layer = 0; layer < nlayer; ++layer) {
-        const int idx = layer_w_idx(layer, w, nwno);
         double g1;
         double g2;
         compute_toon_coefficients(
@@ -276,8 +275,9 @@ extern "C" __global__ void reflected_prepare_constants_kernel(
             &g2);
 
         const double lam = sqrt(fmax(g1 * g1 - g2 * g2, 0.0));
-        lambda_dev[idx] = lam;
-        gama_dev[idx] = (g1 - lam) / g2;
+        const int out_idx = w * nlayer + layer;
+        lambda_dev[out_idx] = lam;
+        gama_dev[out_idx] = (g1 - lam) / g2;
     }
 }
 
