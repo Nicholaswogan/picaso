@@ -6,7 +6,7 @@
 #endif
 
 #ifndef MAX_REFLECT_LAYERS
-#define MAX_REFLECT_LAYERS 256
+#define MAX_REFLECT_LAYERS 64
 #endif
 
 #define SQ3 1.7320508075688772
