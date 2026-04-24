@@ -74,6 +74,7 @@ def _make_reflected_case(nlevel=60, nwno=100_000, numg=10, numt=1):
         frac_c=1.3,
         constant_back=0.29,
         constant_forward=0.39,
+        toon_coefficients=0,
         b_top=0.07,
     )
 
