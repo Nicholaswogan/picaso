@@ -118,7 +118,7 @@ __global__ void calculate_all(
     double * __restrict__ b_surface_dev,
     double u0,
     double * __restrict__ tau_dev,
-    int nwno,
+    int wv_len,
     double * __restrict__ f0pi_dev,
     double * __restrict__ atm_surf_reflect_dev,
     double * __restrict__ dtau_dev,
@@ -127,7 +127,7 @@ __global__ void calculate_all(
     double * __restrict__ a_plus_dev)
 {
     int index = global_idx_1d();
-    int index_1d = (nwno > 0) ? (index % nwno) : 0;
+    int index_1d = (wv_len > 0) ? (index % wv_len) : 0;
 
     const double sq3 = 1.7320508075688772;
     const double u0_inv = 1.0 / u0;
@@ -158,7 +158,7 @@ __global__ void calculate_all(
         const double a_plus  = pref * tmp2 / denom;
 
         const double tau_here     = tau_dev[index];
-        const double tau_next_lvl = tau_dev[index + nwno];
+        const double tau_next_lvl = tau_dev[index + wv_len];
 
         const double exp_top = exp(-tau_here * u0_inv);
         const double exp_bot = exp(-tau_next_lvl * u0_inv);
@@ -173,7 +173,7 @@ __global__ void calculate_all(
         a_plus_dev[index]  = a_plus;
     }
 
-    if (index < nwno) {
+    if (index < wv_len) {
         // surface term
         b_surface_dev[index] = 0.0 + atm_surf_reflect_dev[index] * u0 * f0pi_dev[index] *
                                exp(-tau_dev[vec_size + index] * u0_inv);
