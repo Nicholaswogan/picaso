@@ -1,5 +1,5 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <math_functions.h>
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 256
