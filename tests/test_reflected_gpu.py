@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 cp = pytest.importorskip("cupy")
 
 from picaso import fluxes_noalloc
+from picaso import fluxes_gpu
 from picaso.fluxes_reflected_gpu import ReflectedLightGPUContext
 
 
@@ -113,6 +114,58 @@ def _call_cpu_reflected(case):
     )
 
 
+def _call_legacy_gpu_reflected(case, gweight, tweight):
+    if fluxes_gpu.cuda_lib_reflected is None:
+        pytest.skip("Legacy reflected GPU library not available.")
+
+    gpu_case = {name: cp.asarray(value) for name, value in case.items() if isinstance(value, np.ndarray)}
+
+    xint, _ = fluxes_gpu.get_reflected_1d(
+        case["nlevel"],
+        gpu_case["wno"],
+        case["nwno"],
+        case["numg"],
+        case["numt"],
+        gpu_case["dtau"],
+        gpu_case["tau"],
+        gpu_case["w0"],
+        gpu_case["cosb"],
+        gpu_case["gcos2"],
+        gpu_case["ftau_cld"],
+        gpu_case["ftau_ray"],
+        gpu_case["dtau_og"],
+        gpu_case["tau_og"],
+        gpu_case["w0_og"],
+        gpu_case["cosb_og"],
+        gpu_case["surf_reflect"],
+        gpu_case["ubar0"],
+        gpu_case["ubar1"],
+        case["cos_theta"],
+        gpu_case["F0PI"],
+        case["single_phase"],
+        case["multi_phase"],
+        case["frac_a"],
+        case["frac_b"],
+        case["frac_c"],
+        case["constant_back"],
+        case["constant_forward"],
+        1,
+        0,
+        0,
+        case["b_top"],
+        gweight,
+        tweight,
+        hardware="gpu",
+    )
+    cp.cuda.Stream.null.synchronize()
+    return cp.asnumpy(xint).reshape(-1)
+
+
+def _aggregate_angle_resolved_xint(xint, gweight, tweight):
+    weights = np.outer(gweight, tweight)
+    return np.tensordot(weights, xint, axes=([0, 1], [0, 1]))
+
+
 def test_reflected_gpu_matches_cpu_and_reports_runtime():
     try:
         if cp.cuda.runtime.getDeviceCount() < 1:
@@ -139,6 +192,7 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
         get_lvl_flux=0,
         get_toa_intensity=1,
     )
+    gpu_setup_t0 = time.perf_counter()
     gpu_ctx.set_inputs(
         case["wno"],
         case["dtau"],
@@ -167,6 +221,8 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
         0,
         case["b_top"],
     )
+    cp.cuda.Stream.null.synchronize()
+    gpu_setup_time = time.perf_counter() - gpu_setup_t0
 
     # Warm up the GPU path once, then time the steady-state kernel execution.
     gpu_ctx.run(return_host=True)
@@ -176,15 +232,102 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     gpu_xint, _ = gpu_ctx.run(return_host=True)
     cp.cuda.Stream.null.synchronize()
     gpu_time = time.perf_counter() - gpu_t0
+    gpu_total_time = gpu_setup_time + gpu_time
 
-    speedup = cpu_time / gpu_time if gpu_time > 0 else float("inf")
+    speedup = cpu_time / gpu_total_time if gpu_total_time > 0 else float("inf")
     max_abs = np.max(np.abs(cpu_xint - gpu_xint))
     max_rel = np.max(np.abs(cpu_xint - gpu_xint) / np.maximum(np.abs(cpu_xint), 1e-15))
 
     print(f"CPU reflected solve: {cpu_time:.3f}s")
+    print(f"GPU reflected setup: {gpu_setup_time:.3f}s")
     print(f"GPU reflected solve: {gpu_time:.3f}s")
+    print(f"GPU reflected total: {gpu_total_time:.3f}s")
     print(f"Speedup: {speedup:.2f}x")
     print(f"Max abs diff: {max_abs:.6e}")
     print(f"Max rel diff: {max_rel:.6e}")
 
     np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
+
+
+def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
+    try:
+        if cp.cuda.runtime.getDeviceCount() < 1:
+            pytest.skip("CUDA device not available.")
+    except cp.cuda.runtime.CUDARuntimeError as exc:
+        pytest.skip(f"CUDA runtime unavailable: {exc}")
+
+    if fluxes_gpu.cuda_lib_reflected is None:
+        pytest.skip("Legacy reflected GPU library not available.")
+
+    case = _make_reflected_case()
+    gweight = np.ones(case["numg"], dtype=np.float64)
+    tweight = np.ones(case["numt"], dtype=np.float64)
+    fluxes_gpu.get_reflected_1d_allocate_buffers(case["nlevel"], case["nwno"], case["numg"], case["numt"])
+
+    try:
+        new_ctx = ReflectedLightGPUContext(
+            case["nlevel"],
+            case["nwno"],
+            case["numg"],
+            case["numt"],
+            get_lvl_flux=0,
+            get_toa_intensity=1,
+        )
+        new_ctx.set_inputs(
+            case["wno"],
+            case["dtau"],
+            case["tau"],
+            case["w0"],
+            case["cosb"],
+            case["gcos2"],
+            case["ftau_cld"],
+            case["ftau_ray"],
+            case["dtau_og"],
+            case["tau_og"],
+            case["w0_og"],
+            case["cosb_og"],
+            case["surf_reflect"],
+            case["ubar0"],
+            case["ubar1"],
+            case["cos_theta"],
+            case["F0PI"],
+            case["single_phase"],
+            case["multi_phase"],
+            case["frac_a"],
+            case["frac_b"],
+            case["frac_c"],
+            case["constant_back"],
+            case["constant_forward"],
+            0,
+            case["b_top"],
+        )
+
+        # Warm up both implementations.
+        new_ctx.run(return_host=True)
+        cp.cuda.Stream.null.synchronize()
+        _call_legacy_gpu_reflected(case, gweight, tweight)
+
+        new_t0 = time.perf_counter()
+        new_xint, _ = new_ctx.run(return_host=True)
+        cp.cuda.Stream.null.synchronize()
+        new_time = time.perf_counter() - new_t0
+
+        legacy_t0 = time.perf_counter()
+        legacy_xint = _call_legacy_gpu_reflected(case, gweight, tweight)
+        legacy_time = time.perf_counter() - legacy_t0
+
+        new_flux = _aggregate_angle_resolved_xint(new_xint, gweight, tweight)
+
+        speedup = legacy_time / new_time if new_time > 0 else float("inf")
+        max_abs = np.max(np.abs(new_flux - legacy_xint))
+        max_rel = np.max(np.abs(new_flux - legacy_xint) / np.maximum(np.abs(legacy_xint), 1e-15))
+
+        print(f"Legacy GPU reflected solve: {legacy_time:.3f}s")
+        print(f"New GPU reflected solve: {new_time:.3f}s")
+        print(f"New vs legacy speedup: {speedup:.2f}x")
+        print(f"Legacy/New max abs diff: {max_abs:.6e}")
+        print(f"Legacy/New max rel diff: {max_rel:.6e}")
+
+        np.testing.assert_allclose(new_flux, legacy_xint, rtol=1e-6, atol=1e-8)
+    finally:
+        fluxes_gpu.get_reflected_1d_free()
