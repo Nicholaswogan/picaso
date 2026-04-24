@@ -542,7 +542,7 @@ extern "C" __global__ void reflected_solve_kernel(
         if (get_toa_intensity) {
             double flux_zero = last_pos * exptrm_positive_last +
                 gama_last * last_neg * exptrm_minus_last +
-                surf_reflect_w * u0 * f0pi_w * exp(-tau_dev[layer_w_idx(last, w, nwno)] * inv_u0);
+                c_plus_down_last;
             double xint = flux_zero * inv_pi;
 
             for (int layer = last; layer >= 0; --layer) {
