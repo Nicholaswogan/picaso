@@ -153,32 +153,52 @@ def _set_new_gpu_inputs(ctx, case):
 
 
 def _call_legacy_gpu_reflected(case, gweight, tweight):
+    wno_gpu = cp.asarray(case["wno"])
+    dtau_gpu = cp.asarray(case["dtau"])
+    tau_gpu = cp.asarray(case["tau"])
+    w0_gpu = cp.asarray(case["w0"])
+    cosb_gpu = cp.asarray(case["cosb"])
+    gcos2_gpu = cp.asarray(case["gcos2"])
+    ftau_cld_gpu = cp.asarray(case["ftau_cld"])
+    ftau_ray_gpu = cp.asarray(case["ftau_ray"])
+    dtau_og_gpu = cp.asarray(case["dtau_og"])
+    tau_og_gpu = cp.asarray(case["tau_og"])
+    w0_og_gpu = cp.asarray(case["w0_og"])
+    cosb_og_gpu = cp.asarray(case["cosb_og"])
+    surf_reflect_gpu = cp.asarray(case["surf_reflect"])
+    F0PI_gpu = cp.asarray(case["F0PI"])
+
+    ubar0_host = np.ascontiguousarray(case["ubar0"].reshape(-1))
+    ubar1_host = np.ascontiguousarray(case["ubar1"].reshape(-1))
+    gweight_host = np.ascontiguousarray(gweight)
+    tweight_host = np.ascontiguousarray(tweight)
+
     fluxes_gpu.get_reflected_1d_allocate_buffers(
         case["nlevel"], case["nwno"], case["numg"], case["numt"]
     )
 
     flux_at_top, _ = fluxes_gpu.get_reflected_1d(
         case["nlevel"],
-        cp.asarray(case["wno"]),
+        wno_gpu,
         case["nwno"],
         case["numg"],
         case["numt"],
-        cp.asarray(case["dtau"]),
-        cp.asarray(case["tau"]),
-        cp.asarray(case["w0"]),
-        cp.asarray(case["cosb"]),
-        cp.asarray(case["gcos2"]),
-        cp.asarray(case["ftau_cld"]),
-        cp.asarray(case["ftau_ray"]),
-        cp.asarray(case["dtau_og"]),
-        cp.asarray(case["tau_og"]),
-        cp.asarray(case["w0_og"]),
-        cp.asarray(case["cosb_og"]),
-        cp.asarray(case["surf_reflect"]),
-        case["ubar0"],
-        case["ubar1"],
+        dtau_gpu,
+        tau_gpu,
+        w0_gpu,
+        cosb_gpu,
+        gcos2_gpu,
+        ftau_cld_gpu,
+        ftau_ray_gpu,
+        dtau_og_gpu,
+        tau_og_gpu,
+        w0_og_gpu,
+        cosb_og_gpu,
+        surf_reflect_gpu,
+        ubar0_host,
+        ubar1_host,
         case["cos_theta"],
-        cp.asarray(case["F0PI"]),
+        F0PI_gpu,
         case["single_phase"],
         case["multi_phase"],
         case["frac_a"],
@@ -190,8 +210,8 @@ def _call_legacy_gpu_reflected(case, gweight, tweight):
         0,
         case["toon_coefficients"],
         case["b_top"],
-        gweight,
-        tweight,
+        gweight_host,
+        tweight_host,
         hardware="gpu",
     )
     cp.cuda.Stream.null.synchronize()
