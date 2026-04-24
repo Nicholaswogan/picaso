@@ -307,12 +307,6 @@ extern "C" __global__ void reflected_solve_kernel(
     int get_lvl_flux,
     int toon_coefficients,
     double b_top,
-    const double *lambda_dev,
-    const double *gama_dev,
-    double *A_dev,
-    double *B_dev,
-    double *C_dev,
-    double *D_dev,
     double *xint_at_top_dev,
     double *flux_minus_all_dev,
     double *flux_plus_all_dev,
@@ -344,6 +338,16 @@ extern "C" __global__ void reflected_solve_kernel(
         sh_tau_og[nlayer] = tau_og_dev[layer_w_idx(nlevel - 1, w, nwno)];
         for (int layer = 0; layer < nlayer; ++layer) {
             const int idx = layer_w_idx(layer, w, nwno);
+            double g1;
+            double g2;
+            compute_toon_coefficients(
+                idx,
+                w0_dev,
+                ftau_cld_dev,
+                cosb_dev,
+                toon_coefficients,
+                &g1,
+                &g2);
             sh_tau[layer] = tau_dev[idx];
             sh_dtau[layer] = dtau_dev[idx];
             sh_w0[layer] = w0_dev[idx];
@@ -355,8 +359,8 @@ extern "C" __global__ void reflected_solve_kernel(
             sh_tau_og[layer] = tau_og_dev[idx];
             sh_w0_og[layer] = w0_og_dev[idx];
             sh_cosb_og[layer] = cosb_og_dev[idx];
-            sh_lambda[layer] = lambda_dev[w * nlayer + layer];
-            sh_gama[layer] = gama_dev[w * nlayer + layer];
+            sh_lambda[layer] = sqrt(fmax(g1 * g1 - g2 * g2, 0.0));
+            sh_gama[layer] = (g1 - sh_lambda[layer]) / g2;
         }
     }
     __syncthreads();

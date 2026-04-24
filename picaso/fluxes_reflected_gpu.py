@@ -62,11 +62,9 @@ class ReflectedLightGPUContext:
         )
         self._compile_options = compile_options or ("--std=c++14",)
         self._module = None
-        self._prepare_kernel = None
         self._solve_kernel = None
 
         self._allocate_results()
-        self._allocate_workspace()
         self._compile()
 
         self._inputs_ready = False
@@ -74,7 +72,6 @@ class ReflectedLightGPUContext:
     def _compile(self):
         code = self._source_path.read_text()
         self._module = cp.RawModule(code=code, options=self._compile_options)
-        self._prepare_kernel = self._module.get_function("reflected_prepare_constants_kernel")
         self._solve_kernel = self._module.get_function("reflected_solve_kernel")
 
     def _allocate_results(self):
@@ -93,14 +90,6 @@ class ReflectedLightGPUContext:
             self.flux_plus_all = cp.empty((0, 0, 0), dtype=cp.float64)
             self.flux_minus_midpt_all = cp.empty((0, 0, 0), dtype=cp.float64)
             self.flux_plus_midpt_all = cp.empty((0, 0, 0), dtype=cp.float64)
-
-    def _allocate_workspace(self):
-        self.lambda_dev = cp.empty((self.nwno, self.nlayer), dtype=cp.float64)
-        self.gama_dev = cp.empty((self.nwno, self.nlayer), dtype=cp.float64)
-        self.A_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
-        self.B_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
-        self.C_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
-        self.D_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
 
     def _solve_block_size(self):
         if self.nang < 1:
@@ -132,7 +121,6 @@ class ReflectedLightGPUContext:
         self.get_lvl_flux = int(get_lvl_flux)
         self.get_toa_intensity = int(get_toa_intensity)
         self._allocate_results()
-        self._allocate_workspace()
 
     def set_inputs(
         self,
@@ -201,25 +189,8 @@ class ReflectedLightGPUContext:
         if not self._inputs_ready:
             raise RuntimeError("set_inputs() must be called before run().")
 
-        prepare_block = (256,)
-        prepare_grid = ((self.nwno + prepare_block[0] - 1) // prepare_block[0],)
         solve_block = self._solve_block_size()
         solve_grid = (self.nwno,)
-
-        self._prepare_kernel(
-            prepare_grid,
-            prepare_block,
-            (
-                self.w0,
-                self.ftau_cld,
-                self.cosb,
-                np.int32(self.nlayer),
-                np.int32(self.nwno),
-                np.int32(self.toon_coefficients),
-                self.lambda_dev,
-                self.gama_dev,
-            ),
-        )
 
         self._solve_kernel(
             solve_grid,
@@ -257,12 +228,6 @@ class ReflectedLightGPUContext:
                 np.int32(self.get_lvl_flux),
                 np.int32(self.toon_coefficients),
                 float(self.b_top),
-                self.lambda_dev,
-                self.gama_dev,
-                self.A_dev,
-                self.B_dev,
-                self.C_dev,
-                self.D_dev,
                 self.xint_at_top,
                 self.flux_minus_all,
                 self.flux_plus_all,
@@ -333,12 +298,6 @@ class ReflectedLightGPUContext:
             "ubar0",
             "ubar1",
             "F0PI",
-            "lambda_dev",
-            "gama_dev",
-            "A_dev",
-            "B_dev",
-            "C_dev",
-            "D_dev",
             "xint_at_top",
             "flux_minus_all",
             "flux_plus_all",
