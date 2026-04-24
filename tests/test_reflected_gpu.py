@@ -119,7 +119,11 @@ def _call_legacy_gpu_reflected(case, gweight, tweight):
     if fluxes_gpu.cuda_lib_reflected is None:
         pytest.skip("Legacy reflected GPU library not available.")
 
-    gpu_case = {name: cp.asarray(value) for name, value in case.items() if isinstance(value, np.ndarray)}
+    gpu_case = {
+        name: cp.asarray(value)
+        for name, value in case.items()
+        if isinstance(value, np.ndarray) and name not in {"ubar0", "ubar1"}
+    }
 
     xint, _ = fluxes_gpu.get_reflected_1d(
         case["nlevel"],
@@ -139,8 +143,8 @@ def _call_legacy_gpu_reflected(case, gweight, tweight):
         gpu_case["w0_og"],
         gpu_case["cosb_og"],
         gpu_case["surf_reflect"],
-        gpu_case["ubar0"],
-        gpu_case["ubar1"],
+        case["ubar0"],
+        case["ubar1"],
         case["cos_theta"],
         gpu_case["F0PI"],
         case["single_phase"],
