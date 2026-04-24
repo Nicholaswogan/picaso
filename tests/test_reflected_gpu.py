@@ -114,11 +114,6 @@ def _call_cpu_reflected(case):
     )
 
 
-def _aggregate_angle_resolved_xint(xint, gweight, tweight):
-    weights = np.outer(gweight, tweight)
-    return np.tensordot(weights, xint, axes=([0, 1], [0, 1]))
-
-
 def _set_new_gpu_inputs(ctx, case):
     ctx.set_inputs(
         case["wno"],
@@ -150,7 +145,7 @@ def _set_new_gpu_inputs(ctx, case):
     )
 
 
-def test_reflected_gpu_matches_cpu_and_reports_runtime():
+def _benchmark_gpu_against_cpu(case, dtype, rtol, atol):
     nb.set_num_threads(16)
 
     try:
@@ -177,6 +172,7 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
         case["numt"],
         get_lvl_flux=0,
         get_toa_intensity=1,
+        dtype=dtype,
     )
     gpu_setup_t0 = time.perf_counter()
     _set_new_gpu_inputs(gpu_ctx, case)
@@ -205,5 +201,14 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     print(f"Max abs diff: {max_abs:.6e}")
     print(f"Max rel diff: {max_rel:.6e}")
 
-    np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=rtol, atol=atol)
 
+
+def test_reflected_gpu_matches_cpu_and_reports_runtime():
+    case = _make_reflected_case()
+    _benchmark_gpu_against_cpu(case, np.float64, rtol=1e-6, atol=1e-8)
+
+
+def test_reflected_gpu_float32_matches_cpu_and_reports_runtime():
+    case = _make_reflected_case()
+    _benchmark_gpu_against_cpu(case, np.float32, rtol=1e-4, atol=1e-5)

@@ -18,9 +18,9 @@ def _require_cupy():
         raise RuntimeError("CuPy is required for the reflected-light GPU solver.")
 
 
-def _as_device_array(arr, name, ndim=None):
+def _as_device_array(arr, name, dtype, ndim=None):
     _require_cupy()
-    out = cp.ascontiguousarray(cp.asarray(arr, dtype=cp.float64))
+    out = cp.ascontiguousarray(cp.asarray(arr, dtype=dtype))
     if ndim is not None and out.ndim != ndim:
         raise ValueError(f"{name} must have {ndim} dimensions, got {out.ndim}.")
     return out
@@ -42,10 +42,15 @@ class ReflectedLightGPUContext:
         numt: int,
         get_lvl_flux: int = 0,
         get_toa_intensity: int = 1,
+        dtype=np.float64,
         source_path: str | None = None,
         compile_options: tuple[str, ...] | None = None,
     ):
         _require_cupy()
+
+        self.dtype = np.dtype(dtype)
+        if self.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+            raise ValueError("dtype must be np.float32 or np.float64.")
 
         self.nlevel = int(nlevel)
         self.nlayer = self.nlevel - 1
@@ -60,7 +65,9 @@ class ReflectedLightGPUContext:
             if source_path is not None
             else Path(__file__).resolve().with_name("gpu") / "reflected_1d_noalloc.cu"
         )
-        self._compile_options = compile_options or ("--std=c++14",)
+        self._compile_options = tuple(compile_options or ("--std=c++14",))
+        if self.dtype == np.dtype(np.float32) and "-DREFLECT_USE_FLOAT" not in self._compile_options:
+            self._compile_options = self._compile_options + ("-DREFLECT_USE_FLOAT",)
         self._module = None
         self._solve_kernel = None
 
@@ -76,20 +83,20 @@ class ReflectedLightGPUContext:
 
     def _allocate_results(self):
         if self.get_toa_intensity:
-            self.xint_at_top = cp.empty((self.nang, self.nwno), dtype=cp.float64)
+            self.xint_at_top = cp.empty((self.nang, self.nwno), dtype=self.dtype)
         else:
-            self.xint_at_top = cp.empty((0, 0), dtype=cp.float64)
+            self.xint_at_top = cp.empty((0, 0), dtype=self.dtype)
 
         if self.get_lvl_flux:
-            self.flux_minus_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=cp.float64)
-            self.flux_plus_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=cp.float64)
-            self.flux_minus_midpt_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=cp.float64)
-            self.flux_plus_midpt_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=cp.float64)
+            self.flux_minus_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=self.dtype)
+            self.flux_plus_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=self.dtype)
+            self.flux_minus_midpt_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=self.dtype)
+            self.flux_plus_midpt_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=self.dtype)
         else:
-            self.flux_minus_all = cp.empty((0, 0, 0), dtype=cp.float64)
-            self.flux_plus_all = cp.empty((0, 0, 0), dtype=cp.float64)
-            self.flux_minus_midpt_all = cp.empty((0, 0, 0), dtype=cp.float64)
-            self.flux_plus_midpt_all = cp.empty((0, 0, 0), dtype=cp.float64)
+            self.flux_minus_all = cp.empty((0, 0, 0), dtype=self.dtype)
+            self.flux_plus_all = cp.empty((0, 0, 0), dtype=self.dtype)
+            self.flux_minus_midpt_all = cp.empty((0, 0, 0), dtype=self.dtype)
+            self.flux_plus_midpt_all = cp.empty((0, 0, 0), dtype=self.dtype)
 
     def _solve_block_size(self):
         if self.nang < 1:
@@ -151,22 +158,22 @@ class ReflectedLightGPUContext:
         toon_coefficients,
         b_top,
     ):
-        self.wno = _as_device_array(wno, "wno", ndim=1)
-        self.dtau = _as_device_array(dtau, "dtau", ndim=2)
-        self.tau = _as_device_array(tau, "tau", ndim=2)
-        self.w0 = _as_device_array(w0, "w0", ndim=2)
-        self.cosb = _as_device_array(cosb, "cosb", ndim=2)
-        self.gcos2 = _as_device_array(gcos2, "gcos2", ndim=2)
-        self.ftau_cld = _as_device_array(ftau_cld, "ftau_cld", ndim=2)
-        self.ftau_ray = _as_device_array(ftau_ray, "ftau_ray", ndim=2)
-        self.dtau_og = _as_device_array(dtau_og, "dtau_og", ndim=2)
-        self.tau_og = _as_device_array(tau_og, "tau_og", ndim=2)
-        self.w0_og = _as_device_array(w0_og, "w0_og", ndim=2)
-        self.cosb_og = _as_device_array(cosb_og, "cosb_og", ndim=2)
-        self.surf_reflect = _as_device_array(surf_reflect, "surf_reflect", ndim=1)
-        self.ubar0 = _as_device_array(ubar0, "ubar0").reshape(-1)
-        self.ubar1 = _as_device_array(ubar1, "ubar1").reshape(-1)
-        self.F0PI = _as_device_array(F0PI, "F0PI", ndim=1)
+        self.wno = _as_device_array(wno, "wno", self.dtype, ndim=1)
+        self.dtau = _as_device_array(dtau, "dtau", self.dtype, ndim=2)
+        self.tau = _as_device_array(tau, "tau", self.dtype, ndim=2)
+        self.w0 = _as_device_array(w0, "w0", self.dtype, ndim=2)
+        self.cosb = _as_device_array(cosb, "cosb", self.dtype, ndim=2)
+        self.gcos2 = _as_device_array(gcos2, "gcos2", self.dtype, ndim=2)
+        self.ftau_cld = _as_device_array(ftau_cld, "ftau_cld", self.dtype, ndim=2)
+        self.ftau_ray = _as_device_array(ftau_ray, "ftau_ray", self.dtype, ndim=2)
+        self.dtau_og = _as_device_array(dtau_og, "dtau_og", self.dtype, ndim=2)
+        self.tau_og = _as_device_array(tau_og, "tau_og", self.dtype, ndim=2)
+        self.w0_og = _as_device_array(w0_og, "w0_og", self.dtype, ndim=2)
+        self.cosb_og = _as_device_array(cosb_og, "cosb_og", self.dtype, ndim=2)
+        self.surf_reflect = _as_device_array(surf_reflect, "surf_reflect", self.dtype, ndim=1)
+        self.ubar0 = _as_device_array(ubar0, "ubar0", self.dtype).reshape(-1)
+        self.ubar1 = _as_device_array(ubar1, "ubar1", self.dtype).reshape(-1)
+        self.F0PI = _as_device_array(F0PI, "F0PI", self.dtype, ndim=1)
 
         if self.wno.size != self.nwno:
             raise ValueError(f"wno length mismatch: expected {self.nwno}, got {self.wno.size}.")
@@ -342,6 +349,7 @@ def get_reflected_1d(
     toon_coefficients=0,
     b_top=0.0,
     return_host=False,
+    dtype=np.float64,
 ):
     """Convenience wrapper mirroring the CPU no-alloc reflected API."""
 
@@ -352,6 +360,7 @@ def get_reflected_1d(
         numt,
         get_lvl_flux,
         get_toa_intensity,
+        dtype=dtype,
     )
     ctx.set_inputs(
         wno,
