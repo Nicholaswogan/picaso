@@ -12,23 +12,9 @@
 #ifdef REFLECT_USE_FLOAT
 typedef float reflect_real_t;
 #define REFLECT_C(x) x##f
-__device__ __forceinline__ reflect_real_t reflect_safe_den(reflect_real_t v) {
-    const reflect_real_t eps = REFLECT_C(1e-6);
-    if (fabsf(v) < eps) {
-        return copysignf(eps, v == REFLECT_C(0.0) ? REFLECT_C(1.0) : v);
-    }
-    return v;
-}
 #else
 typedef double reflect_real_t;
 #define REFLECT_C(x) x
-__device__ __forceinline__ reflect_real_t reflect_safe_den(reflect_real_t v) {
-    const reflect_real_t eps = REFLECT_C(1e-12);
-    if (fabs(v) < eps) {
-        return copysign(eps, v == REFLECT_C(0.0) ? REFLECT_C(1.0) : v);
-    }
-    return v;
-}
 #endif
 
 #define SQ3 REFLECT_C(1.7320508075688772)
@@ -43,20 +29,19 @@ __device__ __forceinline__ int layer_w_idx(int layer, int w, int nwno) {
 }
 
 __device__ inline void solve_tridiagonal_inplace(int n, reflect_real_t *a, reflect_real_t *b, reflect_real_t *c, reflect_real_t *d) {
-    const reflect_real_t first_denom = reflect_safe_den(b[0]);
-    d[0] = d[0] / first_denom;
-    c[0] = c[0] / first_denom;
+    d[0] = d[0] / b[0];
+    c[0] = c[0] / b[0];
 
     for (int i = 1; i < n - 1; ++i) {
         reflect_real_t denom = b[i] - a[i] * c[i - 1];
-        reflect_real_t inv_denom = REFLECT_C(1.0) / reflect_safe_den(denom);
+        reflect_real_t inv_denom = REFLECT_C(1.0) / denom;
         c[i] = c[i] * inv_denom;
         d[i] = (d[i] - a[i] * d[i - 1]) * inv_denom;
     }
 
     if (n > 1) {
         reflect_real_t denom = b[n - 1] - a[n - 1] * c[n - 2];
-        d[n - 1] = (d[n - 1] - a[n - 1] * d[n - 2]) / reflect_safe_den(denom);
+        d[n - 1] = (d[n - 1] - a[n - 1] * d[n - 2]) / denom;
 
         for (int i = n - 2; i >= 0; --i) {
             d[i] = d[i] - c[i] * d[i + 1];
@@ -150,7 +135,7 @@ __device__ inline void compute_phase_terms(
     }
 
     const reflect_real_t g4 = REFLECT_C(1.0) - *g3;
-    const reflect_real_t denom = reflect_safe_den(lambda * lambda - inv_u0 * inv_u0);
+    const reflect_real_t denom = lambda * lambda - inv_u0 * inv_u0;
     const reflect_real_t w0 = w0_dev[idx];
 
     *a_minus = f0pi * w0 * (g4 * (g1 + inv_u0) + g2 * (*g3)) / denom;
@@ -190,6 +175,79 @@ __device__ inline void compute_phase_terms(
     (void)cos_theta;
 }
 
+__device__ inline double compute_single_phase_source(
+    int layer,
+    int w,
+    int nwno,
+    const double *ftau_cld_dev,
+    const double *ftau_ray_dev,
+    const double *gcos2_dev,
+    const double *cosb_og_dev,
+    const double *w0_og_dev,
+    double cos_theta,
+    int single_phase,
+    double frac_a,
+    double frac_b,
+    double frac_c,
+    double constant_back,
+    double constant_forward)
+{
+    const int idx = layer_w_idx(layer, w, nwno);
+    const double ftau_cld = ftau_cld_dev[idx];
+    const double ftau_ray = ftau_ray_dev[idx];
+    const double cb = cosb_og_dev[idx];
+
+    double g_forward = 0.0;
+    double g_back = 0.0;
+    double f = 0.0;
+
+    if (single_phase != 1) {
+        g_forward = constant_forward * cb;
+        g_back = constant_back * cb;
+        f = frac_a + frac_b * pow(g_back, frac_c);
+    }
+
+    if (single_phase == 0) {
+        const double hg_forward = (1.0 - g_forward * g_forward) /
+            sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+        const double hg_backward = (1.0 - g_back * g_back) /
+            sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+        return f * hg_forward + (1.0 - f) * hg_backward + gcos2_dev[idx];
+    } else if (single_phase == 1) {
+        return (1.0 - cb * cb) /
+            sqrt((1.0 + cb * cb + 2.0 * cb * cos_theta) *
+                 (1.0 + cb * cb + 2.0 * cb * cos_theta) *
+                 (1.0 + cb * cb + 2.0 * cb * cos_theta));
+    } else if (single_phase == 2) {
+        const double hg_forward = (1.0 - g_forward * g_forward) /
+            sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+        const double hg_backward = (1.0 - g_back * g_back) /
+            sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+        return f * hg_forward + (1.0 - f) * hg_backward;
+    } else {
+        const double hg_forward = (1.0 - g_forward * g_forward) /
+            sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                 (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+        const double hg_backward = (1.0 - g_back * g_back) /
+            sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                 (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+        return ftau_cld * (f * hg_forward + (1.0 - f) * hg_backward) +
+            ftau_ray * (0.75 * (1.0 + cos_theta * cos_theta));
+    }
+
+    (void)w0_og_dev;
+}
+
 extern "C" __global__ void reflected_prepare_constants_kernel(
     const reflect_real_t *w0_dev,
     const reflect_real_t *ftau_cld_dev,
@@ -220,7 +278,7 @@ extern "C" __global__ void reflected_prepare_constants_kernel(
         const reflect_real_t lam = sqrt(fmax(g1 * g1 - g2 * g2, REFLECT_C(0.0)));
         const int out_idx = w * nlayer + layer;
         lambda_dev[out_idx] = lam;
-        gama_dev[out_idx] = (g1 - lam) / reflect_safe_den(g2);
+        gama_dev[out_idx] = (g1 - lam) / g2;
     }
 }
 
@@ -310,7 +368,7 @@ extern "C" __global__ void reflected_solve_kernel(
             sh_w0_og[layer] = w0_og_dev[idx];
             sh_cosb_og[layer] = cosb_og_dev[idx];
             sh_lambda[layer] = sqrt(fmax(g1 * g1 - g2 * g2, REFLECT_C(0.0)));
-            sh_gama[layer] = (g1 - sh_lambda[layer]) / reflect_safe_den(g2);
+            sh_gama[layer] = (g1 - sh_lambda[layer]) / g2;
         }
     }
     __syncthreads();
@@ -430,9 +488,9 @@ extern "C" __global__ void reflected_solve_kernel(
                 u0_scale * exp(-sh_tau[layer] * inv_u0);
             flux_plus_all_dev[out_base] = positive[layer] + sh_gama[layer] * negative[layer] + c_plus_up[layer];
 
-            const reflect_real_t exptrm_mid = exp(REFLECT_C(0.5) * exptrm[layer]);
-            const reflect_real_t exptrm_mid_minus = REFLECT_C(1.0) / exptrm_mid;
-            const reflect_real_t taumid = sh_tau[layer] + REFLECT_C(0.5) * sh_dtau[layer];
+            const double exptrm_mid = exp(0.5 * exptrm[layer]);
+            const double exptrm_mid_minus = 1.0 / exptrm_mid;
+            const double taumid = sh_tau[layer] + 0.5 * sh_dtau[layer];
             flux_minus_midpt_all_dev[out_base] = sh_gama[layer] * positive[layer] * exptrm_mid +
                 negative[layer] * exptrm_mid_minus +
                 a_minus[layer] * exp(-taumid * inv_u0) +
@@ -540,8 +598,8 @@ extern "C" __global__ void reflected_solve_kernel(
                 (1.0 - exp(-dtau_og_here * sum_u * inv_u0u1)) *
                 u0_over_sum;
             const reflect_real_t source_term = geom_A * (REFLECT_C(1.0) - exp(-dtau_here * sum_u * inv_u0u1)) * u0_over_sum +
-                geom_G * (exp(exptrm[layer] - dtau_here * inv_u1) - REFLECT_C(1.0)) / reflect_safe_den(sh_lambda[layer] * u1 - REFLECT_C(1.0)) +
-                geom_H * (REFLECT_C(1.0) - exp(-(exptrm[layer] + dtau_here * inv_u1))) / reflect_safe_den(sh_lambda[layer] * u1 + REFLECT_C(1.0));
+                geom_G * (exp(exptrm[layer] - dtau_here * inv_u1) - REFLECT_C(1.0)) / (sh_lambda[layer] * u1 - REFLECT_C(1.0)) +
+                geom_H * (REFLECT_C(1.0) - exp(-(exptrm[layer] + dtau_here * inv_u1))) / (sh_lambda[layer] * u1 + REFLECT_C(1.0));
 
             xint = xint * exp(-dtau_here * inv_u1) + direct_term + source_term;
         }
