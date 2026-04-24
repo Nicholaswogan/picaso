@@ -545,7 +545,7 @@ extern "C" __global__ void reflected_solve_kernel(
                 c_plus_down_last;
             double xint = flux_zero * inv_pi;
 
-            for (int layer = last - 1; layer >= 0; --layer) {
+            for (int layer = last; layer >= 0; --layer) {
                 const int idx = layer_w_idx(layer, w, nwno);
                 const double lambda_here = lambda_dev[w * nlayer + layer];
                 const double gama_here = gama_dev[w * nlayer + layer];
