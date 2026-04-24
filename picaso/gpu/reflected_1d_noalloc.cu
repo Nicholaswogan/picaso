@@ -5,10 +5,6 @@
 #define BLOCK_SIZE 256
 #endif
 
-#ifndef MAX_REFLECT_LAYERS
-#define MAX_REFLECT_LAYERS 256
-#endif
-
 #define SQ3 1.7320508075688772
 #define PI 3.14159265358979323846264338327950288419716939937510
 
@@ -339,9 +335,6 @@ extern "C" __global__ void reflected_solve_kernel(
     const double f0pi_w = F0PI_dev[w];
     const double surf_reflect_w = surf_reflect_dev[w];
     const double inv_pi = 1.0 / PI;
-    if (nlayer > MAX_REFLECT_LAYERS) {
-        return;
-    }
 
     for (int ang = 0; ang < nang; ++ang) {
         const double u0 = ubar0_dev[ang];
@@ -353,16 +346,8 @@ extern "C" __global__ void reflected_solve_kernel(
         const double inv_sum_u = 1.0 / sum_u;
         const double u0_over_sum = u0 * inv_sum_u;
         const double u0_scale = u0 * f0pi_w;
-
-        double a_minus_cache[MAX_REFLECT_LAYERS];
-        double a_plus_cache[MAX_REFLECT_LAYERS];
-        double c_minus_up_cache[MAX_REFLECT_LAYERS];
-        double c_plus_up_cache[MAX_REFLECT_LAYERS];
-        double c_minus_down_cache[MAX_REFLECT_LAYERS];
-        double c_plus_down_cache[MAX_REFLECT_LAYERS];
-        double exptrm_cache[MAX_REFLECT_LAYERS];
-        double exptrm_positive_cache[MAX_REFLECT_LAYERS];
-        double exptrm_minus_cache[MAX_REFLECT_LAYERS];
+        double c_minus_down_last = 0.0;
+        double c_plus_down_last = 0.0;
 
         if (get_lvl_flux) {
             for (int lvl = 0; lvl < nlevel; ++lvl) {
@@ -378,8 +363,18 @@ extern "C" __global__ void reflected_solve_kernel(
             xint_at_top_dev[ang * nwno + w] = 0.0;
         }
 
+        // Build the tridiagonal system for this angle.
         for (int layer = 0; layer < nlayer; ++layer) {
             double g3;
+            double a_minus;
+            double a_plus;
+            double c_minus_up;
+            double c_plus_up;
+            double c_minus_down;
+            double c_plus_down;
+            double exptrm;
+            double exptrm_positive;
+            double exptrm_minus;
 
             compute_phase_terms(
                 layer,
@@ -411,28 +406,19 @@ extern "C" __global__ void reflected_solve_kernel(
                 constant_forward,
                 toon_coefficients,
                 &g3,
-                &a_minus_cache[layer],
-                &a_plus_cache[layer],
-                &c_minus_up_cache[layer],
-                &c_plus_up_cache[layer],
-                &c_minus_down_cache[layer],
-                &c_plus_down_cache[layer],
-                &exptrm_cache[layer],
-                &exptrm_positive_cache[layer],
-                &exptrm_minus_cache[layer]);
-        }
+                &a_minus,
+                &a_plus,
+                &c_minus_up,
+                &c_plus_up,
+                &c_minus_down,
+                &c_plus_down,
+                &exptrm,
+                &exptrm_positive,
+                &exptrm_minus);
 
-        // Build the tridiagonal system for this angle.
-        for (int layer = 0; layer < nlayer; ++layer) {
+            const double lambda_here = lambda_dev[w * nlayer + layer];
             const double gama_here = gama_dev[w * nlayer + layer];
             const int idx = layer_w_idx(layer, w, nwno);
-            const double c_minus_up = c_minus_up_cache[layer];
-            const double c_plus_up = c_plus_up_cache[layer];
-            const double c_minus_down = c_minus_down_cache[layer];
-            const double c_plus_down = c_plus_down_cache[layer];
-            const double exptrm_positive = exptrm_positive_cache[layer];
-            const double exptrm_minus = exptrm_minus_cache[layer];
-            const double exptrm = exptrm_cache[layer];
 
             if (layer == 0) {
                 A[0] = 0.0;
@@ -442,13 +428,59 @@ extern "C" __global__ void reflected_solve_kernel(
             }
 
             if (layer < nlayer - 1) {
+                const int next_idx = layer_w_idx(layer + 1, w, nwno);
+                const double lambda_next = lambda_dev[w * nlayer + layer + 1];
                 const double gama_next = gama_dev[w * nlayer + layer + 1];
-                const double c_minus_up_next = c_minus_up_cache[layer + 1];
-                const double c_plus_up_next = c_plus_up_cache[layer + 1];
-                const double c_minus_down_next = c_minus_down_cache[layer + 1];
-                const double c_plus_down_next = c_plus_down_cache[layer + 1];
-                const double exptrm_positive_next = exptrm_positive_cache[layer + 1];
-                const double exptrm_minus_next = exptrm_minus_cache[layer + 1];
+
+                double g3_next;
+                double a_minus_next;
+                double a_plus_next;
+                double c_minus_up_next;
+                double c_plus_up_next;
+                double c_minus_down_next;
+                double c_plus_down_next;
+                double exptrm_next;
+                double exptrm_positive_next;
+                double exptrm_minus_next;
+                compute_phase_terms(
+                    layer + 1,
+                    w,
+                    nwno,
+                    w0_dev,
+                    cosb_dev,
+                    ftau_cld_dev,
+                    ftau_ray_dev,
+                    gcos2_dev,
+                    cosb_og_dev,
+                    w0_og_dev,
+                    tau_og_dev,
+                    dtau_og_dev,
+                    tau_dev,
+                    dtau_dev,
+                    lambda_dev + w * nlayer,
+                    gama_dev + w * nlayer,
+                    F0PI_dev,
+                    u0,
+                    u1,
+                    cos_theta,
+                    single_phase,
+                    multi_phase,
+                    frac_a,
+                    frac_b,
+                    frac_c,
+                    constant_back,
+                    constant_forward,
+                    toon_coefficients,
+                    &g3_next,
+                    &a_minus_next,
+                    &a_plus_next,
+                    &c_minus_up_next,
+                    &c_plus_up_next,
+                    &c_minus_down_next,
+                    &c_plus_down_next,
+                    &exptrm_next,
+                    &exptrm_positive_next,
+                    &exptrm_minus_next);
 
                 const double e1 = exptrm_positive + gama_here * exptrm_minus;
                 const double e2 = exptrm_positive - gama_here * exptrm_minus;
@@ -467,6 +499,15 @@ extern "C" __global__ void reflected_solve_kernel(
                 B[row2] = (e1 - e3) * (gama_next + 1.0);
                 C[row2] = (e1 + e3) * (gama_next - 1.0);
                 D[row2] = e3 * (c_plus_up_next - c_plus_down) + e1 * (c_minus_down - c_minus_up_next);
+
+                (void)lambda_next;
+                (void)g3_next;
+                (void)a_minus_next;
+                (void)a_plus_next;
+                (void)c_plus_down_next;
+                (void)exptrm_next;
+                (void)exptrm_positive_next;
+                (void)exptrm_minus_next;
             }
 
             if (layer == nlayer - 1) {
@@ -475,6 +516,8 @@ extern "C" __global__ void reflected_solve_kernel(
                 const double e3 = gama_here * exptrm_positive + exptrm_minus;
                 const double e4 = gama_here * exptrm_positive - exptrm_minus;
                 const double b_surface = surf_reflect_w * u0 * f0pi_w * exp(-tau_dev[layer_w_idx(nlevel - 1, w, nwno)] * inv_u0);
+                c_minus_down_last = c_minus_down;
+                c_plus_down_last = c_plus_down;
 
                 A[tri_size - 1] = e1 - surf_reflect_w * e3;
                 B[tri_size - 1] = e2 - surf_reflect_w * e4;
@@ -491,13 +534,15 @@ extern "C" __global__ void reflected_solve_kernel(
         const double last_neg = D[last_base] - D[last_base + 1];
         const double lambda_last = lambda_dev[w * nlayer + last];
         const double gama_last = gama_dev[w * nlayer + last];
-        const double exptrm_positive_last = exptrm_positive_cache[last];
-        const double exptrm_minus_last = exptrm_minus_cache[last];
+        const double exptrm_last = lambda_last * dtau_dev[layer_w_idx(last, w, nwno)];
+        const double exptrm_last_clip = exptrm_last > 35.0 ? 35.0 : exptrm_last;
+        const double exptrm_positive_last = exp(exptrm_last_clip);
+        const double exptrm_minus_last = 1.0 / exptrm_positive_last;
 
         if (get_toa_intensity) {
             double flux_zero = last_pos * exptrm_positive_last +
                 gama_last * last_neg * exptrm_minus_last +
-                c_plus_down_cache[last];
+                c_plus_down_last;
             double xint = flux_zero * inv_pi;
 
             for (int layer = last; layer >= 0; --layer) {
@@ -509,14 +554,58 @@ extern "C" __global__ void reflected_solve_kernel(
                 const double tau_og_here = tau_og_dev[idx];
                 const double dtau_og_here = dtau_og_dev[idx];
                 const double w0_og_here = w0_og_dev[idx];
+                const double c_og = cosb_og_dev[idx];
                 const double w0_here = w0_dev[idx];
-                const double a_minus = a_minus_cache[layer];
-                const double a_plus = a_plus_cache[layer];
-                const double c_minus_up = c_minus_up_cache[layer];
-                const double c_plus_up = c_plus_up_cache[layer];
-                const double exptrm = exptrm_cache[layer];
-                const double exptrm_positive = exptrm_positive_cache[layer];
-                const double exptrm_minus = exptrm_minus_cache[layer];
+
+                double g3;
+                double a_minus;
+                double a_plus;
+                double c_minus_up;
+                double c_plus_up;
+                double c_minus_down;
+                double c_plus_down;
+                double exptrm;
+                double exptrm_positive;
+                double exptrm_minus;
+                compute_phase_terms(
+                    layer,
+                    w,
+                    nwno,
+                    w0_dev,
+                    cosb_dev,
+                    ftau_cld_dev,
+                    ftau_ray_dev,
+                    gcos2_dev,
+                    cosb_og_dev,
+                    w0_og_dev,
+                    tau_og_dev,
+                    dtau_og_dev,
+                    tau_dev,
+                    dtau_dev,
+                    lambda_dev + w * nlayer,
+                    gama_dev + w * nlayer,
+                    F0PI_dev,
+                    u0,
+                    u1,
+                    cos_theta,
+                    single_phase,
+                    multi_phase,
+                    frac_a,
+                    frac_b,
+                    frac_c,
+                    constant_back,
+                    constant_forward,
+                    toon_coefficients,
+                    &g3,
+                    &a_minus,
+                    &a_plus,
+                    &c_minus_up,
+                    &c_plus_up,
+                    &c_minus_down,
+                    &c_plus_down,
+                    &exptrm,
+                    &exptrm_positive,
+                    &exptrm_minus);
 
                 const int base = 2 * layer;
                 const double positive = D[base] + D[base + 1];
@@ -588,10 +677,10 @@ extern "C" __global__ void reflected_solve_kernel(
                 const int out_base = (ang * nlevel + last) * nwno + w;
                 flux_minus_all_dev[out_base] = gama_last * last_pos * exptrm_positive_last +
                     last_neg * exptrm_minus_last +
-                    c_minus_down_cache[last];
+                    c_minus_down_last;
                 flux_plus_all_dev[out_base] = last_pos * exptrm_positive_last +
                     gama_last * last_neg * exptrm_minus_last +
-                    c_plus_down_cache[last];
+                    c_plus_down_last;
                 flux_minus_midpt_all_dev[out_base] = 0.0;
                 flux_plus_midpt_all_dev[out_base] = 0.0;
             }
