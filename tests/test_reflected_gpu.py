@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO_ROOT))
 cp = pytest.importorskip("cupy")
 
 from picaso import fluxes_noalloc
+from picaso import fluxes_gpu
 from picaso.fluxes_reflected_gpu import ReflectedLightGPUContext
 
 
@@ -150,6 +151,52 @@ def _set_new_gpu_inputs(ctx, case):
     )
 
 
+def _call_legacy_gpu_reflected(case, gweight, tweight):
+    fluxes_gpu.get_reflected_1d_allocate_buffers(
+        case["nlevel"], case["nwno"], case["numg"], case["numt"]
+    )
+
+    flux_at_top, _ = fluxes_gpu.get_reflected_1d(
+        case["nlevel"],
+        cp.asarray(case["wno"]),
+        case["nwno"],
+        case["numg"],
+        case["numt"],
+        cp.asarray(case["dtau"]),
+        cp.asarray(case["tau"]),
+        cp.asarray(case["w0"]),
+        cp.asarray(case["cosb"]),
+        cp.asarray(case["gcos2"]),
+        cp.asarray(case["ftau_cld"]),
+        cp.asarray(case["ftau_ray"]),
+        cp.asarray(case["dtau_og"]),
+        cp.asarray(case["tau_og"]),
+        cp.asarray(case["w0_og"]),
+        cp.asarray(case["cosb_og"]),
+        cp.asarray(case["surf_reflect"]),
+        case["ubar0"],
+        case["ubar1"],
+        case["cos_theta"],
+        cp.asarray(case["F0PI"]),
+        case["single_phase"],
+        case["multi_phase"],
+        case["frac_a"],
+        case["frac_b"],
+        case["frac_c"],
+        case["constant_back"],
+        case["constant_forward"],
+        1,
+        0,
+        case["toon_coefficients"],
+        case["b_top"],
+        gweight,
+        tweight,
+        hardware="gpu",
+    )
+    cp.cuda.Stream.null.synchronize()
+    return cp.asnumpy(flux_at_top)
+
+
 def test_reflected_gpu_matches_cpu_and_reports_runtime():
     nb.set_num_threads(16)
 
@@ -207,3 +254,63 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
 
     np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
 
+
+def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
+    nb.set_num_threads(16)
+
+    try:
+        if cp.cuda.runtime.getDeviceCount() < 1:
+            pytest.skip("CUDA device not available.")
+    except cp.cuda.runtime.CUDARuntimeError as exc:
+        pytest.skip(f"CUDA runtime unavailable: {exc}")
+
+    if fluxes_gpu.cuda_lib_reflected is None:
+        pytest.skip("Legacy reflected GPU library not available.")
+
+    # Use a smaller case here: the legacy wrapper is much more brittle than the
+    # new persistent GPU context and is most trustworthy when we keep the call
+    # shape modest.
+    case = _make_reflected_case(nlevel=24, nwno=16_384, numg=6, numt=1)
+    gweight = np.linspace(1.0, 1.3, case["numg"], dtype=np.float64)
+    tweight = np.ones(case["numt"], dtype=np.float64)
+
+    new_ctx = ReflectedLightGPUContext(
+        case["nlevel"],
+        case["nwno"],
+        case["numg"],
+        case["numt"],
+        get_lvl_flux=0,
+        get_toa_intensity=1,
+    )
+    _set_new_gpu_inputs(new_ctx, case)
+
+    # Warm both implementations once.
+    new_ctx.run(return_host=True)
+    cp.cuda.Stream.null.synchronize()
+    _call_legacy_gpu_reflected(case, gweight, tweight)
+
+    new_t0 = time.perf_counter()
+    _set_new_gpu_inputs(new_ctx, case)
+    new_xint, _ = new_ctx.run(return_host=True)
+    cp.cuda.Stream.null.synchronize()
+    new_time = time.perf_counter() - new_t0
+
+    legacy_t0 = time.perf_counter()
+    legacy_xint = _call_legacy_gpu_reflected(case, gweight, tweight)
+    legacy_time = time.perf_counter() - legacy_t0
+
+    new_flux = _aggregate_angle_resolved_xint(new_xint, gweight, tweight)
+
+    speedup = legacy_time / new_time if new_time > 0 else float("inf")
+    max_abs = np.max(np.abs(new_flux - legacy_xint))
+    max_rel = np.max(np.abs(new_flux - legacy_xint) / np.maximum(np.abs(legacy_xint), 1e-15))
+
+    print(f"Legacy GPU end-to-end: {legacy_time:.3f}s")
+    print(f"New GPU end-to-end: {new_time:.3f}s")
+    print(f"New vs legacy speedup: {speedup:.2f}x")
+    print(f"Legacy/New max abs diff: {max_abs:.6e}")
+    print(f"Legacy/New max rel diff: {max_rel:.6e}")
+
+    # The legacy path is less numerically stable than the new GPU context, so
+    # this comparison is intentionally looser than the CPU parity test.
+    np.testing.assert_allclose(new_flux, legacy_xint, rtol=5e-4, atol=5e-6)
