@@ -367,7 +367,7 @@ extern "C" __global__ void reflected_solve_kernel(
             sh_tau_og[layer] = tau_og_dev[idx];
             sh_w0_og[layer] = w0_og_dev[idx];
             sh_cosb_og[layer] = cosb_og_dev[idx];
-            sh_lambda[layer] = sqrt(fmax(g1 * g1 - g2 * g2, REFLECT_C(0.0)));
+            sh_lambda[layer] = sqrt(fmax(g1 * g1 - g2 * g2, 0.0));
             sh_gama[layer] = (g1 - sh_lambda[layer]) / g2;
         }
     }
