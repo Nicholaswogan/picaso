@@ -42,9 +42,7 @@ __device__ inline void solve_tridiagonal_inplace(int n, double *a, double *b, do
 }
 
 __device__ inline void compute_toon_coefficients(
-    int layer,
-    int w,
-    int nwno,
+    int idx,
     const double *w0_dev,
     const double *ftau_cld_dev,
     const double *cosb_dev,
@@ -52,7 +50,6 @@ __device__ inline void compute_toon_coefficients(
     double *g1,
     double *g2)
 {
-    const int idx = layer_w_idx(layer, w, nwno);
     const double w0 = w0_dev[idx];
     const double ftau = ftau_cld_dev[idx];
     const double cb = cosb_dev[idx];
@@ -106,7 +103,7 @@ __device__ inline void compute_phase_terms(
     double *exptrm_positive,
     double *exptrm_minus)
 {
-    const int idx = layer_w_idx(layer, w, nwno);
+    const int idx = layer;
     const double lambda = lambda_row[layer];
     const double gama = gama_row[layer];
     const double f0pi = F0PI_dev[w];
@@ -115,9 +112,7 @@ __device__ inline void compute_phase_terms(
     double g1;
     double g2;
     compute_toon_coefficients(
-        layer,
-        w,
-        nwno,
+        idx,
         w0_dev,
         ftau_cld_dev,
         cosb_dev,
@@ -138,8 +133,8 @@ __device__ inline void compute_phase_terms(
     *a_minus = f0pi * w0 * (g4 * (g1 + inv_u0) + g2 * (*g3)) / denom;
     *a_plus = f0pi * w0 * ((*g3) * (g1 - inv_u0) + g2 * g4) / denom;
 
-    const double tau_here = tau_dev[idx];
-    const double tau_next = tau_dev[layer_w_idx(layer + 1, w, nwno)];
+    const double tau_here = tau_dev[layer];
+    const double tau_next = tau_dev[layer + 1];
     const double exp_top = exp(-tau_here * inv_u0);
     const double exp_bottom = exp(-tau_next * inv_u0);
 
@@ -264,9 +259,7 @@ extern "C" __global__ void reflected_prepare_constants_kernel(
         double g1;
         double g2;
         compute_toon_coefficients(
-            layer,
-            w,
-            nwno,
+            layer_w_idx(layer, w, nwno),
             w0_dev,
             ftau_cld_dev,
             cosb_dev,
