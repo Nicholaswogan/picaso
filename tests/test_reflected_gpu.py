@@ -177,8 +177,6 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     cp.cuda.Stream.null.synchronize()
     gpu_time = time.perf_counter() - gpu_t0
 
-    np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
-
     speedup = cpu_time / gpu_time if gpu_time > 0 else float("inf")
     max_abs = np.max(np.abs(cpu_xint - gpu_xint))
     max_rel = np.max(np.abs(cpu_xint - gpu_xint) / np.maximum(np.abs(cpu_xint), 1e-15))
@@ -188,3 +186,5 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     print(f"Speedup: {speedup:.2f}x")
     print(f"Max abs diff: {max_abs:.6e}")
     print(f"Max rel diff: {max_rel:.6e}")
+
+    np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
