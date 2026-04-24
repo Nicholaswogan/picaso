@@ -102,6 +102,15 @@ class ReflectedLightGPUContext:
         self.C_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
         self.D_dev = cp.empty((self.nwno, 2 * self.nlayer), dtype=cp.float64)
 
+    def _solve_block_size(self):
+        if self.nang < 1:
+            raise ValueError("numg * numt must be at least 1.")
+        if self.nang > 1024:
+            raise ValueError(
+                f"GPU reflected solver currently supports at most 1024 angles per call, got {self.nang}."
+            )
+        return (self.nang,)
+
     def ensure(self, nlevel, nwno, numg, numt, get_lvl_flux, get_toa_intensity):
         changed = (
             int(nlevel) != self.nlevel
@@ -192,12 +201,14 @@ class ReflectedLightGPUContext:
         if not self._inputs_ready:
             raise RuntimeError("set_inputs() must be called before run().")
 
-        block = (256,)
-        grid = ((self.nwno + block[0] - 1) // block[0],)
+        prepare_block = (256,)
+        prepare_grid = ((self.nwno + prepare_block[0] - 1) // prepare_block[0],)
+        solve_block = self._solve_block_size()
+        solve_grid = (self.nwno,)
 
         self._prepare_kernel(
-            grid,
-            block,
+            prepare_grid,
+            prepare_block,
             (
                 self.w0,
                 self.ftau_cld,
@@ -211,8 +222,8 @@ class ReflectedLightGPUContext:
         )
 
         self._solve_kernel(
-            grid,
-            block,
+            solve_grid,
+            solve_block,
             (
                 np.int32(self.nlevel),
                 np.int32(self.nlayer),

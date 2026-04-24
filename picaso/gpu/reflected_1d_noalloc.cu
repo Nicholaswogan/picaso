@@ -5,6 +5,10 @@
 #define BLOCK_SIZE 256
 #endif
 
+#ifndef MAX_REFLECT_LAYERS
+#define MAX_REFLECT_LAYERS 256
+#endif
+
 #define SQ3 1.7320508075688772
 #define PI 3.14159265358979323846264338327950288419716939937510
 
@@ -322,372 +326,279 @@ extern "C" __global__ void reflected_solve_kernel(
     double *flux_minus_midpt_all_dev,
     double *flux_plus_midpt_all_dev)
 {
-    const int w = global_wno_idx();
-    if (w >= nwno) {
+    const int w = blockIdx.x;
+    const int ang = threadIdx.x;
+    if (w >= nwno || ang >= nang || nlayer > MAX_REFLECT_LAYERS) {
         return;
     }
 
-    const int tri_size = 2 * nlayer;
-    double *A = A_dev + w * tri_size;
-    double *B = B_dev + w * tri_size;
-    double *C = C_dev + w * tri_size;
-    double *D = D_dev + w * tri_size;
+    __shared__ double sh_tau[MAX_REFLECT_LAYERS + 1];
+    __shared__ double sh_dtau[MAX_REFLECT_LAYERS];
+    __shared__ double sh_w0[MAX_REFLECT_LAYERS];
+    __shared__ double sh_cosb[MAX_REFLECT_LAYERS];
+    __shared__ double sh_gcos2[MAX_REFLECT_LAYERS];
+    __shared__ double sh_ftau_cld[MAX_REFLECT_LAYERS];
+    __shared__ double sh_ftau_ray[MAX_REFLECT_LAYERS];
+    __shared__ double sh_dtau_og[MAX_REFLECT_LAYERS];
+    __shared__ double sh_tau_og[MAX_REFLECT_LAYERS + 1];
+    __shared__ double sh_w0_og[MAX_REFLECT_LAYERS];
+    __shared__ double sh_cosb_og[MAX_REFLECT_LAYERS];
+    __shared__ double sh_lambda[MAX_REFLECT_LAYERS];
+    __shared__ double sh_gama[MAX_REFLECT_LAYERS];
+
+    if (threadIdx.x == 0) {
+        sh_tau[nlayer] = tau_dev[layer_w_idx(nlevel - 1, w, nwno)];
+        sh_tau_og[nlayer] = tau_og_dev[layer_w_idx(nlevel - 1, w, nwno)];
+        for (int layer = 0; layer < nlayer; ++layer) {
+            const int idx = layer_w_idx(layer, w, nwno);
+            sh_tau[layer] = tau_dev[idx];
+            sh_dtau[layer] = dtau_dev[idx];
+            sh_w0[layer] = w0_dev[idx];
+            sh_cosb[layer] = cosb_dev[idx];
+            sh_gcos2[layer] = gcos2_dev[idx];
+            sh_ftau_cld[layer] = ftau_cld_dev[idx];
+            sh_ftau_ray[layer] = ftau_ray_dev[idx];
+            sh_dtau_og[layer] = dtau_og_dev[idx];
+            sh_tau_og[layer] = tau_og_dev[idx];
+            sh_w0_og[layer] = w0_og_dev[idx];
+            sh_cosb_og[layer] = cosb_og_dev[idx];
+            sh_lambda[layer] = lambda_dev[w * nlayer + layer];
+            sh_gama[layer] = gama_dev[w * nlayer + layer];
+        }
+    }
+    __syncthreads();
+
+    const double u0 = ubar0_dev[ang];
+    const double u1 = ubar1_dev[ang];
+    const double inv_u0 = 1.0 / u0;
+    const double inv_u1 = 1.0 / u1;
+    const double inv_u0u1 = inv_u0 * inv_u1;
+    const double sum_u = u0 + u1;
+    const double inv_sum_u = 1.0 / sum_u;
+    const double u0_over_sum = u0 * inv_sum_u;
     const double f0pi_w = F0PI_dev[w];
     const double surf_reflect_w = surf_reflect_dev[w];
-    const double inv_pi = 1.0 / PI;
+    const double u0_scale = u0 * f0pi_w;
 
-    for (int ang = 0; ang < nang; ++ang) {
-        const double u0 = ubar0_dev[ang];
-        const double u1 = ubar1_dev[ang];
-        const double inv_u0 = 1.0 / u0;
-        const double inv_u1 = 1.0 / u1;
-        const double inv_u0u1 = inv_u0 * inv_u1;
-        const double sum_u = u0 + u1;
-        const double inv_sum_u = 1.0 / sum_u;
-        const double u0_over_sum = u0 * inv_sum_u;
-        const double u0_scale = u0 * f0pi_w;
-        double c_minus_down_last = 0.0;
-        double c_plus_down_last = 0.0;
+    double a_minus[MAX_REFLECT_LAYERS];
+    double a_plus[MAX_REFLECT_LAYERS];
+    double c_minus_up[MAX_REFLECT_LAYERS];
+    double c_plus_up[MAX_REFLECT_LAYERS];
+    double c_minus_down[MAX_REFLECT_LAYERS];
+    double c_plus_down[MAX_REFLECT_LAYERS];
+    double exptrm[MAX_REFLECT_LAYERS];
+    double exptrm_positive[MAX_REFLECT_LAYERS];
+    double exptrm_minus[MAX_REFLECT_LAYERS];
+    double positive[MAX_REFLECT_LAYERS];
+    double negative[MAX_REFLECT_LAYERS];
+    double A[2 * MAX_REFLECT_LAYERS];
+    double B[2 * MAX_REFLECT_LAYERS];
+    double C[2 * MAX_REFLECT_LAYERS];
+    double D[2 * MAX_REFLECT_LAYERS];
 
-        if (get_lvl_flux) {
-            for (int lvl = 0; lvl < nlevel; ++lvl) {
-                const int out_base = (ang * nlevel + lvl) * nwno + w;
-                flux_minus_all_dev[out_base] = 0.0;
-                flux_plus_all_dev[out_base] = 0.0;
-                flux_minus_midpt_all_dev[out_base] = 0.0;
-                flux_plus_midpt_all_dev[out_base] = 0.0;
-            }
+    if (get_lvl_flux) {
+        for (int lvl = 0; lvl < nlevel; ++lvl) {
+            const int out_base = (ang * nlevel + lvl) * nwno + w;
+            flux_minus_all_dev[out_base] = 0.0;
+            flux_plus_all_dev[out_base] = 0.0;
+            flux_minus_midpt_all_dev[out_base] = 0.0;
+            flux_plus_midpt_all_dev[out_base] = 0.0;
+        }
+    }
+    if (get_toa_intensity) {
+        xint_at_top_dev[ang * nwno + w] = 0.0;
+    }
+
+    for (int layer = 0; layer < nlayer; ++layer) {
+        double g3;
+        compute_phase_terms(
+            layer, w, nwno,
+            sh_w0, sh_cosb, sh_ftau_cld, sh_ftau_ray, sh_gcos2,
+            sh_cosb_og, sh_w0_og, sh_tau_og, sh_dtau_og,
+            sh_tau, sh_dtau, sh_lambda, sh_gama, F0PI_dev,
+            u0, u1, cos_theta, single_phase, multi_phase,
+            frac_a, frac_b, frac_c, constant_back, constant_forward,
+            toon_coefficients,
+            &g3,
+            &a_minus[layer], &a_plus[layer],
+            &c_minus_up[layer], &c_plus_up[layer],
+            &c_minus_down[layer], &c_plus_down[layer],
+            &exptrm[layer], &exptrm_positive[layer], &exptrm_minus[layer]);
+    }
+
+    const int tri_size = 2 * nlayer;
+    for (int layer = 0; layer < nlayer; ++layer) {
+        const double gama_here = sh_gama[layer];
+        if (layer == 0) {
+            A[0] = 0.0;
+            B[0] = gama_here + 1.0;
+            C[0] = gama_here - 1.0;
+            D[0] = b_top - c_minus_up[layer];
         }
 
-        if (get_toa_intensity) {
-            xint_at_top_dev[ang * nwno + w] = 0.0;
-        }
+        if (layer < nlayer - 1) {
+            const double gama_next = sh_gama[layer + 1];
+            const double e1 = exptrm_positive[layer] + gama_here * exptrm_minus[layer];
+            const double e2 = exptrm_positive[layer] - gama_here * exptrm_minus[layer];
+            const double e3 = gama_here * exptrm_positive[layer] + exptrm_minus[layer];
+            const double e4 = gama_here * exptrm_positive[layer] - exptrm_minus[layer];
 
-        // Build the tridiagonal system for this angle.
+            const int row1 = 2 * layer + 1;
+            A[row1] = (e1 + e3) * (gama_next - 1.0);
+            B[row1] = (e2 + e4) * (gama_next - 1.0);
+            C[row1] = 2.0 * (1.0 - gama_next * gama_next);
+            D[row1] = (gama_next - 1.0) * (c_plus_up[layer + 1] - c_plus_down[layer]) +
+                      (1.0 - gama_next) * (c_minus_down[layer] - c_minus_up[layer + 1]);
+
+            const int row2 = 2 * layer + 2;
+            A[row2] = 2.0 * (1.0 - gama_here * gama_here);
+            B[row2] = (e1 - e3) * (gama_next + 1.0);
+            C[row2] = (e1 + e3) * (gama_next - 1.0);
+            D[row2] = e3 * (c_plus_up[layer + 1] - c_plus_down[layer]) +
+                      e1 * (c_minus_down[layer] - c_minus_up[layer + 1]);
+        } else {
+            const double e1 = exptrm_positive[layer] + gama_here * exptrm_minus[layer];
+            const double e2 = exptrm_positive[layer] - gama_here * exptrm_minus[layer];
+            const double e3 = gama_here * exptrm_positive[layer] + exptrm_minus[layer];
+            const double e4 = gama_here * exptrm_positive[layer] - exptrm_minus[layer];
+            const double b_surface = surf_reflect_w * u0 * f0pi_w * exp(-sh_tau[nlayer] * inv_u0);
+            A[tri_size - 1] = e1 - surf_reflect_w * e3;
+            B[tri_size - 1] = e2 - surf_reflect_w * e4;
+            C[tri_size - 1] = 0.0;
+            D[tri_size - 1] = b_surface - c_plus_down[layer] + surf_reflect_w * c_minus_down[layer];
+        }
+    }
+
+    solve_tridiagonal_inplace(tri_size, A, B, C, D);
+
+    for (int layer = 0; layer < nlayer; ++layer) {
+        positive[layer] = D[2 * layer] + D[2 * layer + 1];
+        negative[layer] = D[2 * layer] - D[2 * layer + 1];
+    }
+
+    if (get_lvl_flux) {
         for (int layer = 0; layer < nlayer; ++layer) {
-            double g3;
-            double a_minus;
-            double a_plus;
-            double c_minus_up;
-            double c_plus_up;
-            double c_minus_down;
-            double c_plus_down;
-            double exptrm;
-            double exptrm_positive;
-            double exptrm_minus;
+            const int out_base = (ang * nlevel + layer) * nwno + w;
+            flux_minus_all_dev[out_base] = positive[layer] * sh_gama[layer] + negative[layer] + c_minus_up[layer] +
+                u0_scale * exp(-sh_tau[layer] * inv_u0);
+            flux_plus_all_dev[out_base] = positive[layer] + sh_gama[layer] * negative[layer] + c_plus_up[layer];
 
-            compute_phase_terms(
-                layer,
-                w,
-                nwno,
-                w0_dev,
-                cosb_dev,
-                ftau_cld_dev,
-                ftau_ray_dev,
-                gcos2_dev,
-                cosb_og_dev,
-                w0_og_dev,
-                tau_og_dev,
-                dtau_og_dev,
-                tau_dev,
-                dtau_dev,
-                lambda_dev + w * nlayer,
-                gama_dev + w * nlayer,
-                F0PI_dev,
-                u0,
-                u1,
-                cos_theta,
-                single_phase,
-                multi_phase,
-                frac_a,
-                frac_b,
-                frac_c,
-                constant_back,
-                constant_forward,
-                toon_coefficients,
-                &g3,
-                &a_minus,
-                &a_plus,
-                &c_minus_up,
-                &c_plus_up,
-                &c_minus_down,
-                &c_plus_down,
-                &exptrm,
-                &exptrm_positive,
-                &exptrm_minus);
-
-            const double lambda_here = lambda_dev[w * nlayer + layer];
-            const double gama_here = gama_dev[w * nlayer + layer];
-            const int idx = layer_w_idx(layer, w, nwno);
-
-            if (layer == 0) {
-                A[0] = 0.0;
-                B[0] = gama_here + 1.0;
-                C[0] = gama_here - 1.0;
-                D[0] = b_top - c_minus_up;
-            }
-
-            if (layer < nlayer - 1) {
-                const int next_idx = layer_w_idx(layer + 1, w, nwno);
-                const double lambda_next = lambda_dev[w * nlayer + layer + 1];
-                const double gama_next = gama_dev[w * nlayer + layer + 1];
-
-                double g3_next;
-                double a_minus_next;
-                double a_plus_next;
-                double c_minus_up_next;
-                double c_plus_up_next;
-                double c_minus_down_next;
-                double c_plus_down_next;
-                double exptrm_next;
-                double exptrm_positive_next;
-                double exptrm_minus_next;
-                compute_phase_terms(
-                    layer + 1,
-                    w,
-                    nwno,
-                    w0_dev,
-                    cosb_dev,
-                    ftau_cld_dev,
-                    ftau_ray_dev,
-                    gcos2_dev,
-                    cosb_og_dev,
-                    w0_og_dev,
-                    tau_og_dev,
-                    dtau_og_dev,
-                    tau_dev,
-                    dtau_dev,
-                    lambda_dev + w * nlayer,
-                    gama_dev + w * nlayer,
-                    F0PI_dev,
-                    u0,
-                    u1,
-                    cos_theta,
-                    single_phase,
-                    multi_phase,
-                    frac_a,
-                    frac_b,
-                    frac_c,
-                    constant_back,
-                    constant_forward,
-                    toon_coefficients,
-                    &g3_next,
-                    &a_minus_next,
-                    &a_plus_next,
-                    &c_minus_up_next,
-                    &c_plus_up_next,
-                    &c_minus_down_next,
-                    &c_plus_down_next,
-                    &exptrm_next,
-                    &exptrm_positive_next,
-                    &exptrm_minus_next);
-
-                const double e1 = exptrm_positive + gama_here * exptrm_minus;
-                const double e2 = exptrm_positive - gama_here * exptrm_minus;
-                const double e3 = gama_here * exptrm_positive + exptrm_minus;
-                const double e4 = gama_here * exptrm_positive - exptrm_minus;
-
-                const int row1 = 2 * layer + 1;
-                A[row1] = (e1 + e3) * (gama_next - 1.0);
-                B[row1] = (e2 + e4) * (gama_next - 1.0);
-                C[row1] = 2.0 * (1.0 - gama_next * gama_next);
-                D[row1] = (gama_next - 1.0) * (c_plus_up_next - c_plus_down) +
-                          (1.0 - gama_next) * (c_minus_down - c_minus_up_next);
-
-                const int row2 = 2 * layer + 2;
-                A[row2] = 2.0 * (1.0 - gama_here * gama_here);
-                B[row2] = (e1 - e3) * (gama_next + 1.0);
-                C[row2] = (e1 + e3) * (gama_next - 1.0);
-                D[row2] = e3 * (c_plus_up_next - c_plus_down) + e1 * (c_minus_down - c_minus_up_next);
-
-                (void)lambda_next;
-                (void)g3_next;
-                (void)a_minus_next;
-                (void)a_plus_next;
-                (void)c_plus_down_next;
-                (void)exptrm_next;
-                (void)exptrm_positive_next;
-                (void)exptrm_minus_next;
-            }
-
-            if (layer == nlayer - 1) {
-                const double e1 = exptrm_positive + gama_here * exptrm_minus;
-                const double e2 = exptrm_positive - gama_here * exptrm_minus;
-                const double e3 = gama_here * exptrm_positive + exptrm_minus;
-                const double e4 = gama_here * exptrm_positive - exptrm_minus;
-                const double b_surface = surf_reflect_w * u0 * f0pi_w * exp(-tau_dev[layer_w_idx(nlevel - 1, w, nwno)] * inv_u0);
-                c_minus_down_last = c_minus_down;
-                c_plus_down_last = c_plus_down;
-
-                A[tri_size - 1] = e1 - surf_reflect_w * e3;
-                B[tri_size - 1] = e2 - surf_reflect_w * e4;
-                C[tri_size - 1] = 0.0;
-                D[tri_size - 1] = b_surface - c_plus_down + surf_reflect_w * c_minus_down;
-            }
+            const double exptrm_mid = exp(0.5 * exptrm[layer]);
+            const double exptrm_mid_minus = 1.0 / exptrm_mid;
+            const double taumid = sh_tau[layer] + 0.5 * sh_dtau[layer];
+            flux_minus_midpt_all_dev[out_base] = sh_gama[layer] * positive[layer] * exptrm_mid +
+                negative[layer] * exptrm_mid_minus +
+                a_minus[layer] * exp(-taumid * inv_u0) +
+                u0_scale * exp(-taumid * inv_u0);
+            flux_plus_midpt_all_dev[out_base] = positive[layer] * exptrm_mid +
+                sh_gama[layer] * negative[layer] * exptrm_mid_minus +
+                a_plus[layer] * exp(-taumid * inv_u0);
         }
 
-        solve_tridiagonal_inplace(tri_size, A, B, C, D);
-
+        const int out_base = (ang * nlevel + nlayer) * nwno + w;
         const int last = nlayer - 1;
-        const int last_base = 2 * last;
-        const double last_pos = D[last_base] + D[last_base + 1];
-        const double last_neg = D[last_base] - D[last_base + 1];
-        const double lambda_last = lambda_dev[w * nlayer + last];
-        const double gama_last = gama_dev[w * nlayer + last];
-        const double exptrm_last = lambda_last * dtau_dev[layer_w_idx(last, w, nwno)];
-        const double exptrm_last_clip = exptrm_last > 35.0 ? 35.0 : exptrm_last;
-        const double exptrm_positive_last = exp(exptrm_last_clip);
-        const double exptrm_minus_last = 1.0 / exptrm_positive_last;
+        flux_minus_all_dev[out_base] = sh_gama[last] * positive[last] * exptrm_positive[last] +
+            negative[last] * exptrm_minus[last] +
+            c_minus_down[last];
+        flux_plus_all_dev[out_base] = positive[last] * exptrm_positive[last] +
+            sh_gama[last] * negative[last] * exptrm_minus[last] +
+            c_plus_down[last];
+        flux_minus_midpt_all_dev[out_base] = 0.0;
+        flux_plus_midpt_all_dev[out_base] = 0.0;
+    }
 
-        if (get_toa_intensity) {
-            double flux_zero = last_pos * exptrm_positive_last +
-                gama_last * last_neg * exptrm_minus_last +
-                c_plus_down_last;
-            double xint = flux_zero * inv_pi;
+    if (get_toa_intensity) {
+        const int last = nlayer - 1;
+        double xint = (positive[last] * exptrm_positive[last] +
+            sh_gama[last] * negative[last] * exptrm_minus[last] +
+            c_plus_down[last]) / PI;
 
-            for (int layer = last; layer >= 0; --layer) {
-                const int idx = layer_w_idx(layer, w, nwno);
-                const double lambda_here = lambda_dev[w * nlayer + layer];
-                const double gama_here = gama_dev[w * nlayer + layer];
-                const double dtau_here = dtau_dev[idx];
-                const double tau_here = tau_dev[idx];
-                const double tau_og_here = tau_og_dev[idx];
-                const double dtau_og_here = dtau_og_dev[idx];
-                const double w0_og_here = w0_og_dev[idx];
-                const double c_og = cosb_og_dev[idx];
-                const double w0_here = w0_dev[idx];
+        for (int layer = last; layer >= 0; --layer) {
+            const double dtau_here = sh_dtau[layer];
+            const double tau_here = sh_tau[layer];
+            const double tau_og_here = sh_tau_og[layer];
+            const double dtau_og_here = sh_dtau_og[layer];
+            const double w0_og_here = sh_w0_og[layer];
+            const double w0_here = sh_w0[layer];
+            const double c_og = sh_cosb_og[layer];
 
-                double g3;
-                double a_minus;
-                double a_plus;
-                double c_minus_up;
-                double c_plus_up;
-                double c_minus_down;
-                double c_plus_down;
-                double exptrm;
-                double exptrm_positive;
-                double exptrm_minus;
-                compute_phase_terms(
-                    layer,
-                    w,
-                    nwno,
-                    w0_dev,
-                    cosb_dev,
-                    ftau_cld_dev,
-                    ftau_ray_dev,
-                    gcos2_dev,
-                    cosb_og_dev,
-                    w0_og_dev,
-                    tau_og_dev,
-                    dtau_og_dev,
-                    tau_dev,
-                    dtau_dev,
-                    lambda_dev + w * nlayer,
-                    gama_dev + w * nlayer,
-                    F0PI_dev,
-                    u0,
-                    u1,
-                    cos_theta,
-                    single_phase,
-                    multi_phase,
-                    frac_a,
-                    frac_b,
-                    frac_c,
-                    constant_back,
-                    constant_forward,
-                    toon_coefficients,
-                    &g3,
-                    &a_minus,
-                    &a_plus,
-                    &c_minus_up,
-                    &c_plus_up,
-                    &c_minus_down,
-                    &c_plus_down,
-                    &exptrm,
-                    &exptrm_positive,
-                    &exptrm_minus);
-
-                const int base = 2 * layer;
-                const double positive = D[base] + D[base + 1];
-                const double negative = D[base] - D[base + 1];
-                const double ubar2 = 0.767;
-                const double phase_term = 3.0 * ubar2 * ubar2 * u1 * u1 - 1.0;
-                double multi_plus = 0.0;
-                double multi_minus = 0.0;
-
-                if (multi_phase == 0) {
-                    multi_plus = 1.0 + 1.5 * ftau_cld_dev[idx] * cosb_dev[idx] * u1 + gcos2_dev[idx] * phase_term / 2.0;
-                    multi_minus = 1.0 - 1.5 * ftau_cld_dev[idx] * cosb_dev[idx] * u1 + gcos2_dev[idx] * phase_term / 2.0;
-                } else {
-                    multi_plus = 1.0 + 1.5 * ftau_cld_dev[idx] * cosb_dev[idx] * u1;
-                    multi_minus = 1.0 - 1.5 * ftau_cld_dev[idx] * cosb_dev[idx] * u1;
-                }
-
-                const double geom_A = (multi_plus * c_plus_up + multi_minus * c_minus_up) * w0_here * 0.5 / PI;
-                const double geom_G = positive * (multi_plus + gama_here * multi_minus) * w0_here * 0.5 / PI;
-                const double geom_H = negative * (gama_here * multi_plus + multi_minus) * w0_here * 0.5 / PI;
-                const double direct_term = (w0_og_here * f0pi_w / (4.0 * PI)) *
-                    compute_single_phase_source(
-                        layer,
-                        w,
-                        nwno,
-                        ftau_cld_dev,
-                        ftau_ray_dev,
-                        gcos2_dev,
-                        cosb_og_dev,
-                        w0_og_dev,
-                        cos_theta,
-                        single_phase,
-                        frac_a,
-                        frac_b,
-                        frac_c,
-                        constant_back,
-                        constant_forward) *
-                    exp(-tau_og_here * inv_u0) *
-                    (1.0 - exp(-dtau_og_here * sum_u * inv_u0u1)) *
-                    u0_over_sum;
-                const double source_term = geom_A * (1.0 - exp(-dtau_here * sum_u * inv_u0u1)) * u0_over_sum +
-                    geom_G * (exp(exptrm - dtau_here * inv_u1) - 1.0) / (lambda_here * u1 - 1.0) +
-                    geom_H * (1.0 - exp(-(exptrm + dtau_here * inv_u1))) / (lambda_here * u1 + 1.0);
-
-                xint = xint * exp(-dtau_here * inv_u1) + direct_term + source_term;
-
-                if (get_lvl_flux) {
-                    const int out_base = (ang * nlevel + layer) * nwno + w;
-                    flux_minus_all_dev[out_base] = positive * gama_here + negative + c_minus_up +
-                        u0_scale * exp(-tau_here * inv_u0);
-                    flux_plus_all_dev[out_base] = positive + gama_here * negative + c_plus_up;
-
-                    const double exptrm_mid = exp(0.5 * exptrm);
-                    const double exptrm_mid_minus = 1.0 / exptrm_mid;
-                    const double taumid = tau_here + 0.5 * dtau_here;
-                    const double c_plus_mid = a_plus * exp(-taumid * inv_u0);
-                    const double c_minus_mid = a_minus * exp(-taumid * inv_u0);
-                    flux_minus_midpt_all_dev[out_base] = gama_here * positive * exptrm_mid +
-                        negative * exptrm_mid_minus +
-                        c_minus_mid +
-                        u0_scale * exp(-taumid * inv_u0);
-                    flux_plus_midpt_all_dev[out_base] = positive * exptrm_mid +
-                        gama_here * negative * exptrm_mid_minus +
-                        c_plus_mid;
-                }
+            double g_forward = 0.0;
+            double g_back = 0.0;
+            double f = 0.0;
+            if (single_phase != 1) {
+                g_forward = constant_forward * c_og;
+                g_back = constant_back * c_og;
+                f = frac_a + frac_b * pow(g_back, frac_c);
             }
 
-            if (get_lvl_flux) {
-                const int out_base = (ang * nlevel + last) * nwno + w;
-                flux_minus_all_dev[out_base] = gama_last * last_pos * exptrm_positive_last +
-                    last_neg * exptrm_minus_last +
-                    c_minus_down_last;
-                flux_plus_all_dev[out_base] = last_pos * exptrm_positive_last +
-                    gama_last * last_neg * exptrm_minus_last +
-                    c_plus_down_last;
-                flux_minus_midpt_all_dev[out_base] = 0.0;
-                flux_plus_midpt_all_dev[out_base] = 0.0;
+            double p_single;
+            if (single_phase == 0) {
+                const double hg_forward = (1.0 - g_forward * g_forward) /
+                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+                const double hg_backward = (1.0 - g_back * g_back) /
+                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+                p_single = f * hg_forward + (1.0 - f) * hg_backward + sh_gcos2[layer];
+            } else if (single_phase == 1) {
+                p_single = (1.0 - c_og * c_og) /
+                    sqrt((1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
+                         (1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
+                         (1.0 + c_og * c_og + 2.0 * c_og * cos_theta));
+            } else if (single_phase == 2) {
+                const double hg_forward = (1.0 - g_forward * g_forward) /
+                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+                const double hg_backward = (1.0 - g_back * g_back) /
+                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+                p_single = f * hg_forward + (1.0 - f) * hg_backward;
+            } else {
+                const double hg_forward = (1.0 - g_forward * g_forward) /
+                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+                const double hg_backward = (1.0 - g_back * g_back) /
+                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+                p_single = sh_ftau_cld[layer] * (f * hg_forward + (1.0 - f) * hg_backward) +
+                    sh_ftau_ray[layer] * (0.75 * (1.0 + cos_theta * cos_theta));
             }
 
-            xint_at_top_dev[ang * nwno + w] = xint;
+            const double ubar2 = 0.767;
+            const double phase_term = 3.0 * ubar2 * ubar2 * u1 * u1 - 1.0;
+            double multi_plus = 0.0;
+            double multi_minus = 0.0;
+            if (multi_phase == 0) {
+                multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
+                multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
+            } else {
+                multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
+                multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
+            }
+
+            const double positive_layer = positive[layer];
+            const double negative_layer = negative[layer];
+            const double geom_A = (multi_plus * c_plus_up[layer] + multi_minus * c_minus_up[layer]) * w0_here * 0.5 / PI;
+            const double geom_G = positive_layer * (multi_plus + sh_gama[layer] * multi_minus) * w0_here * 0.5 / PI;
+            const double geom_H = negative_layer * (sh_gama[layer] * multi_plus + multi_minus) * w0_here * 0.5 / PI;
+            const double direct_term = (w0_og_here * f0pi_w / (4.0 * PI)) *
+                p_single *
+                exp(-tau_og_here * inv_u0) *
+                (1.0 - exp(-dtau_og_here * sum_u * inv_u0u1)) *
+                u0_over_sum;
+            const double source_term = geom_A * (1.0 - exp(-dtau_here * sum_u * inv_u0u1)) * u0_over_sum +
+                geom_G * (exp(exptrm[layer] - dtau_here * inv_u1) - 1.0) / (sh_lambda[layer] * u1 - 1.0) +
+                geom_H * (1.0 - exp(-(exptrm[layer] + dtau_here * inv_u1))) / (sh_lambda[layer] * u1 + 1.0);
+
+            xint = xint * exp(-dtau_here * inv_u1) + direct_term + source_term;
         }
 
-        (void)wno_dev;
+        xint_at_top_dev[ang * nwno + w] = xint;
     }
 }
