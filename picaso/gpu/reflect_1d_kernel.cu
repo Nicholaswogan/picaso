@@ -282,11 +282,6 @@ __global__ void init_matrix(
     int index = global_idx_1d();
     if (index >= nwno) return;
 
-    if (index == 0) {
-        printf("legacy enter init_matrix A0=%.17g B0=%.17g D0=%.17g\n",
-                A_odd_dev[(2 * nlayer - 1) * nwno], B_odd_dev[(2 * nlayer - 1) * nwno], D_odd_dev[(2 * nlayer - 1) * nwno]);
-    }
-
     int index_last = index + (2 * nlayer - 1) * nwno;
     const double denom = B_odd_dev[index_last] + 1e-16;
     AS_dev[index_last] = A_odd_dev[index_last] / denom;
@@ -308,15 +303,6 @@ __global__ void calculate_Xmatrix1(
     int index = global_idx_1d();
     if (index >= nwno) return;
 
-    if (index == 0) {
-        printf("legacy enter calculate_Xmatrix1 layer=%d A1=%.17g B1=%.17g C1=%.17g D1=%.17g\n",
-                i_layer,
-                A_odd_dev[index + i_layer * nwno],
-                B_odd_dev[index + i_layer * nwno],
-                C_odd_dev[index + i_layer * nwno],
-                D_odd_dev[index + i_layer * nwno]);
-    }
-
     int index1 = index + i_layer * nwno;
     int index2 = index + (i_layer + 1) * nwno;
 
@@ -336,11 +322,6 @@ __global__ void calculate_Xmatrix2(
     int index = global_idx_1d();
     if (index >= nwno) return;
 
-    if (index == 0) {
-        printf("legacy enter calculate_Xmatrix2 layer=%d AS0=%.17g DS0=%.17g\n",
-                i_layer, AS_dev[index + i_layer * nwno], DS_dev[index + i_layer * nwno]);
-    }
-
     int index1 = index + i_layer * nwno;
     int index2 = index + (i_layer - 1) * nwno;
 
@@ -356,10 +337,6 @@ __global__ void set_matrix_zero(
     int index = global_idx_1d();
     if (index >= nwno) return;
 
-    if (index == 0) {
-        printf("legacy enter set_matrix_zero DS0=%.17g\n", DS_dev[0]);
-    }
-
     XK_dev[index] = DS_dev[index];
 }
 
@@ -372,10 +349,6 @@ __global__ void calculate_pos_neg(
 {
     int index = global_idx_1d();
     if (index >= nlayer * nwno) return;
-
-    if (index == 0) {
-        printf("legacy enter calculate_pos_neg XK0=%.17g XK1=%.17g\n", XK_dev[0], XK_dev[1]);
-    }
 
     int index_wn    = index % nwno;
     int index_layer = index / nwno;
@@ -1122,21 +1095,6 @@ extern "C" void get_reflected_1d_run(
     int N_layer  = nlayer * nwno;
     int N_level  = nlevel * nwno;
 
-    if (ng > 0 && nt > 0) {
-        double probe_w0 = 0.0;
-        double probe_ftau = 0.0;
-        double probe_cosb = 0.0;
-        double probe_f0pi = 0.0;
-        double probe_surf = 0.0;
-        CUDA_CHECK(cudaMemcpy(&probe_w0, ctx.w0_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_ftau, ctx.ftau_cld_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_cosb, ctx.cosb_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_f0pi, ctx.f0pi_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_surf, ctx.atm_surf_reflect_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "legacy host probe inputs w0/ftau/cosb/f0pi/surf[0]=%.17g %.17g %.17g %.17g %.17g\n",
-                probe_w0, probe_ftau, probe_cosb, probe_f0pi, probe_surf);
-    }
-
 
 
     ctx.albedo_dev = (double*)test_out;
@@ -1158,21 +1116,6 @@ extern "C" void get_reflected_1d_run(
     calculate_g12_lg_quad<<<make_grid(N_layer), BLOCK_SIZE>>>(
         ctx.w0_dev, ctx.ftau_cld_dev, ctx.cosb_dev, N_layer,
         ctx.g1_dev, ctx.g2_dev, ctx.lambda_dev, ctx.gama_dev);
-    CUDA_CHECK(cudaPeekAtLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // if (i_iter == 0) {
-        double probe_g1 = 0.0;
-        double probe_g2 = 0.0;
-        double probe_lam = 0.0;
-        double probe_gam = 0.0;
-        CUDA_CHECK(cudaMemcpy(&probe_g1, ctx.g1_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_g2, ctx.g2_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_lam, ctx.lambda_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&probe_gam, ctx.gama_dev, sizeof(double), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "legacy host probe after calculate_g12_lg_quad g1/g2/lambda/gama[0]=%.17g %.17g %.17g %.17g\n",
-                probe_g1, probe_g2, probe_lam, probe_gam);
-    // }
 
     // Reset albedo for this run
     CUDA_CHECK(cudaMemset(ctx.albedo_dev, 0, nwno * sizeof(double)));
@@ -1194,17 +1137,6 @@ extern "C" void get_reflected_1d_run(
             ctx.dtau_dev, ctx.exptrm_dev,
             ctx.a_minus_dev, ctx.a_plus_dev);
 
-        if (i_iter == 0) {
-            double probe_a = 0.0;
-            double probe_b = 0.0;
-            double probe_d = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_a, ctx.a_minus_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_b, ctx.a_plus_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_d, ctx.b_surface_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy host probe after calculate_all a-/a+/b_surface[0]=%.17g %.17g %.17g\n",
-                    probe_a, probe_b, probe_d);
-        }
-
         // exptrm -> exp+ / exp-
         calculate_allexptrm<<<make_grid(N_layer), BLOCK_SIZE>>>(
             ctx.exptrm_dev, ctx.exptrm_positive_dev,
@@ -1216,19 +1148,6 @@ extern "C" void get_reflected_1d_run(
             ctx.gama_dev,
             ctx.e1_dev, ctx.e2_dev, ctx.e3_dev, ctx.e4_dev,
             N_layer);
-
-        if (i_iter == 0) {
-            double probe_e1 = 0.0;
-            double probe_e2 = 0.0;
-            double probe_e3 = 0.0;
-            double probe_e4 = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_e1, ctx.e1_dev + (nlayer - 1) * nwno, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_e2, ctx.e2_dev + (nlayer - 1) * nwno, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_e3, ctx.e3_dev + (nlayer - 1) * nwno, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_e4, ctx.e4_dev + (nlayer - 1) * nwno, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy host probe after calculate_e_matrix e1/e2/e3/e4[last]=%.17g %.17g %.17g %.17g\n",
-                    probe_e1, probe_e2, probe_e3, probe_e4);
-        }
 
         // Tri-diagonal setup
         setup_tri_diag_all<<<make_grid(N_layer), BLOCK_SIZE>>>(
@@ -1258,34 +1177,11 @@ extern "C" void get_reflected_1d_run(
             ctx.e1_dev, ctx.e2_dev, ctx.e3_dev, ctx.e4_dev,
             ctx.A_odd_dev, ctx.B_odd_dev, ctx.C_odd_dev, ctx.D_odd_dev);
 
-        if (i_iter == 0) {
-            double probe_a = 0.0;
-            double probe_b = 0.0;
-            double probe_c = 0.0;
-            double probe_d = 0.0;
-            int last = (2 * nlayer - 1) * nwno;
-            CUDA_CHECK(cudaMemcpy(&probe_a, ctx.A_odd_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_b, ctx.B_odd_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_c, ctx.C_odd_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_d, ctx.D_odd_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy host probe after setup_tri_diag_last A/B/C/D[last]=%.17g %.17g %.17g %.17g\n",
-                    probe_a, probe_b, probe_c, probe_d);
-        }
-
         // Init tri-diagonal at bottom
         init_matrix<<<make_grid(nwno), BLOCK_SIZE>>>(
             ctx.AS_dev, ctx.DS_dev,
             ctx.A_odd_dev, ctx.B_odd_dev, ctx.D_odd_dev,
             nlayer, nwno);
-
-        if (i_iter == 0) {
-            double probe_as = 0.0;
-            double probe_ds = 0.0;
-            int last = (2 * nlayer - 1) * nwno;
-            CUDA_CHECK(cudaMemcpy(&probe_as, ctx.AS_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_ds, ctx.DS_dev + last, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy host probe after init_matrix AS[last]=%.17g DS[last]=%.17g\n", probe_as, probe_ds);
-        }
 
         // Forward sweep
         for (int i_layer = 2 * nlayer - 2; i_layer > -1; --i_layer) {
@@ -1293,14 +1189,6 @@ extern "C" void get_reflected_1d_run(
                 ctx.AS_dev, ctx.DS_dev, ctx.XK_dev,
                 ctx.A_odd_dev, ctx.B_odd_dev, ctx.C_odd_dev, ctx.D_odd_dev,
                 nlayer, nwno, i_layer);
-
-            if (i_iter == 0 && i_layer == 2 * nlayer - 2) {
-                double probe_as = 0.0;
-                double probe_ds = 0.0;
-                CUDA_CHECK(cudaMemcpy(&probe_as, ctx.AS_dev, sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(&probe_ds, ctx.DS_dev, sizeof(double), cudaMemcpyDeviceToHost));
-                fprintf(stderr, "legacy host probe after Xmatrix1 AS[0]=%.17g DS[0]=%.17g\n", probe_as, probe_ds);
-            }
         }
 
         // Set XK bottom
@@ -1308,37 +1196,17 @@ extern "C" void get_reflected_1d_run(
             ctx.XK_dev, ctx.DS_dev,
             nlayer, nwno);
 
-        if (i_iter == 0) {
-            double probe_xk = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_xk, ctx.XK_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy host probe after set_matrix_zero XK[0]=%.17g\n", probe_xk);
-        }
-
         // Back substitution
         for (int i_layer = 1; i_layer < 2 * nlayer; ++i_layer) {
             calculate_Xmatrix2<<<make_grid(nwno), BLOCK_SIZE>>>(
                 ctx.AS_dev, ctx.DS_dev, ctx.XK_dev,
                 nlayer, nwno, i_layer);
-
-            if (i_iter == 0 && i_layer == 1) {
-                double probe_xk = 0.0;
-                CUDA_CHECK(cudaMemcpy(&probe_xk, ctx.XK_dev, sizeof(double), cudaMemcpyDeviceToHost));
-                fprintf(stderr, "legacy host probe after Xmatrix2 XK[0]=%.17g\n", probe_xk);
-            }
         }
 
         // Positive/negative
         calculate_pos_neg<<<make_grid(N_layer), BLOCK_SIZE>>>(
             ctx.XK_dev, ctx.positive_dev, ctx.negative_dev,
             nlayer, nwno);
-
-        {
-            double probe_pos = 0.0;
-            double probe_neg = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_pos, ctx.positive_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&probe_neg, ctx.negative_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy probe pos/neg[0]=%.17g %.17g\n", probe_pos, probe_neg);
-        }
 
         // Fluxes
         calculate_flux_minus_plus_first<<<make_grid(N_layer), BLOCK_SIZE>>>(
@@ -1388,12 +1256,6 @@ extern "C" void get_reflected_1d_run(
             ctx.gama_dev, ctx.c_plus_down_dev,
             nlayer, nwno);
 
-        {
-            double probe_xint = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_xint, ctx.xint_dev + nwno, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy probe after flux0 xint[nwno]=%.17g\n", probe_xint);
-        }
-
         // G/H/A matrices
         calculate_GHA<<<make_grid(N_layer), BLOCK_SIZE>>>(
             ctx.G_matrix_dev, ctx.H_matrix_dev, ctx.A_matrix_dev,
@@ -1403,12 +1265,6 @@ extern "C" void get_reflected_1d_run(
             ctx.c_plus_up_dev, ctx.c_minus_up_dev,
             ubar1[i_iter],
             nlayer, nwno);
-
-        {
-            double probe_g = 0.0;
-            CUDA_CHECK(cudaMemcpy(&probe_g, ctx.G_matrix_dev, sizeof(double), cudaMemcpyDeviceToHost));
-            fprintf(stderr, "legacy probe G[0]=%.17g\n", probe_g);
-        }
 
         // Direct scattering
         direct_scattering<<<make_grid(N_layer), BLOCK_SIZE>>>(
@@ -1443,12 +1299,6 @@ extern "C" void get_reflected_1d_run(
     // Final albedo from albedo_dev
     final_albedo<<<make_grid(nwno), BLOCK_SIZE>>>(
         ctx.albedo_dev, ctx.f0pi_dev, cos_theta, nwno);
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    double probe = 0.0;
-    CUDA_CHECK(cudaMemcpy(&probe, ctx.albedo_dev, sizeof(double), cudaMemcpyDeviceToHost));
-    fprintf(stderr, "legacy reflected probe albedo[0]=%.17g\n", probe);
 
 
 }
