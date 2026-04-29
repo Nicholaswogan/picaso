@@ -9,6 +9,10 @@
 #define MAX_REFLECT_LAYERS 64
 #endif
 
+#ifndef MAX_REFLECT_ANGLES
+#define MAX_REFLECT_ANGLES 1024
+#endif
+
 #define SQ3 1.7320508075688772
 #define PI 3.14159265358979323846264338327950288419716939937510
 
@@ -307,7 +311,8 @@ extern "C" __global__ void reflected_solve_kernel(
     int get_lvl_flux,
     int toon_coefficients,
     double b_top,
-    double *xint_at_top_dev,
+    const double *combined_weights_dev,
+    double *legacy_albedo_dev,
     double *flux_minus_all_dev,
     double *flux_plus_all_dev,
     double *flux_minus_midpt_all_dev,
@@ -392,6 +397,7 @@ extern "C" __global__ void reflected_solve_kernel(
     double B[2 * MAX_REFLECT_LAYERS];
     double C[2 * MAX_REFLECT_LAYERS];
     double D[2 * MAX_REFLECT_LAYERS];
+    __shared__ double sh_weighted_xint[MAX_REFLECT_ANGLES];
 
     if (get_lvl_flux) {
         for (int lvl = 0; lvl < nlevel; ++lvl) {
@@ -402,10 +408,6 @@ extern "C" __global__ void reflected_solve_kernel(
             flux_plus_midpt_all_dev[out_base] = 0.0;
         }
     }
-    if (get_toa_intensity) {
-        xint_at_top_dev[ang * nwno + w] = 0.0;
-    }
-
     for (int layer = 0; layer < nlayer; ++layer) {
         double g3;
         compute_phase_terms(
@@ -504,98 +506,104 @@ extern "C" __global__ void reflected_solve_kernel(
         flux_plus_midpt_all_dev[out_base] = 0.0;
     }
 
-    if (get_toa_intensity) {
-        const int last = nlayer - 1;
-        double xint = (positive[last] * exptrm_positive[last] +
-            sh_gama[last] * negative[last] * exptrm_minus[last] +
-            c_plus_down[last]) / PI;
+    const int last = nlayer - 1;
+    double xint = (positive[last] * exptrm_positive[last] +
+        sh_gama[last] * negative[last] * exptrm_minus[last] +
+        c_plus_down[last]) / PI;
 
-        for (int layer = last; layer >= 0; --layer) {
-            const double dtau_here = sh_dtau[layer];
-            const double tau_here = sh_tau[layer];
-            const double tau_og_here = sh_tau_og[layer];
-            const double dtau_og_here = sh_dtau_og[layer];
-            const double w0_og_here = sh_w0_og[layer];
-            const double w0_here = sh_w0[layer];
-            const double c_og = sh_cosb_og[layer];
+    for (int layer = last; layer >= 0; --layer) {
+        const double dtau_here = sh_dtau[layer];
+        const double tau_here = sh_tau[layer];
+        const double tau_og_here = sh_tau_og[layer];
+        const double dtau_og_here = sh_dtau_og[layer];
+        const double w0_og_here = sh_w0_og[layer];
+        const double w0_here = sh_w0[layer];
+        const double c_og = sh_cosb_og[layer];
 
-            double g_forward = 0.0;
-            double g_back = 0.0;
-            double f = 0.0;
-            if (single_phase != 1) {
-                g_forward = constant_forward * c_og;
-                g_back = constant_back * c_og;
-                f = frac_a + frac_b * pow(g_back, frac_c);
-            }
-
-            double p_single;
-            if (single_phase == 0) {
-                const double hg_forward = (1.0 - g_forward * g_forward) /
-                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
-                const double hg_backward = (1.0 - g_back * g_back) /
-                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
-                p_single = f * hg_forward + (1.0 - f) * hg_backward + sh_gcos2[layer];
-            } else if (single_phase == 1) {
-                p_single = (1.0 - c_og * c_og) /
-                    sqrt((1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
-                         (1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
-                         (1.0 + c_og * c_og + 2.0 * c_og * cos_theta));
-            } else if (single_phase == 2) {
-                const double hg_forward = (1.0 - g_forward * g_forward) /
-                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
-                const double hg_backward = (1.0 - g_back * g_back) /
-                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
-                p_single = f * hg_forward + (1.0 - f) * hg_backward;
-            } else {
-                const double hg_forward = (1.0 - g_forward * g_forward) /
-                    sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
-                         (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
-                const double hg_backward = (1.0 - g_back * g_back) /
-                    sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
-                         (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
-                p_single = sh_ftau_cld[layer] * (f * hg_forward + (1.0 - f) * hg_backward) +
-                    sh_ftau_ray[layer] * (0.75 * (1.0 + cos_theta * cos_theta));
-            }
-
-            const double ubar2 = 0.767;
-            const double phase_term = 3.0 * ubar2 * ubar2 * u1 * u1 - 1.0;
-            double multi_plus = 0.0;
-            double multi_minus = 0.0;
-            if (multi_phase == 0) {
-                multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
-                multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
-            } else {
-                multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
-                multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
-            }
-
-            const double positive_layer = positive[layer];
-            const double negative_layer = negative[layer];
-            const double geom_A = (multi_plus * c_plus_up[layer] + multi_minus * c_minus_up[layer]) * w0_here * 0.5 / PI;
-            const double geom_G = positive_layer * (multi_plus + sh_gama[layer] * multi_minus) * w0_here * 0.5 / PI;
-            const double geom_H = negative_layer * (sh_gama[layer] * multi_plus + multi_minus) * w0_here * 0.5 / PI;
-            const double direct_term = (w0_og_here * f0pi_w / (4.0 * PI)) *
-                p_single *
-                exp(-tau_og_here * inv_u0) *
-                (1.0 - exp(-dtau_og_here * sum_u * inv_u0u1)) *
-                u0_over_sum;
-            const double source_term = geom_A * (1.0 - exp(-dtau_here * sum_u * inv_u0u1)) * u0_over_sum +
-                geom_G * (exp(exptrm[layer] - dtau_here * inv_u1) - 1.0) / (sh_lambda[layer] * u1 - 1.0) +
-                geom_H * (1.0 - exp(-(exptrm[layer] + dtau_here * inv_u1))) / (sh_lambda[layer] * u1 + 1.0);
-
-            xint = xint * exp(-dtau_here * inv_u1) + direct_term + source_term;
+        double g_forward = 0.0;
+        double g_back = 0.0;
+        double f = 0.0;
+        if (single_phase != 1) {
+            g_forward = constant_forward * c_og;
+            g_back = constant_back * c_og;
+            f = frac_a + frac_b * pow(g_back, frac_c);
         }
 
-        xint_at_top_dev[ang * nwno + w] = xint;
+        double p_single;
+        if (single_phase == 0) {
+            const double hg_forward = (1.0 - g_forward * g_forward) /
+                sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+            const double hg_backward = (1.0 - g_back * g_back) /
+                sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+            p_single = f * hg_forward + (1.0 - f) * hg_backward + sh_gcos2[layer];
+        } else if (single_phase == 1) {
+            p_single = (1.0 - c_og * c_og) /
+                sqrt((1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
+                     (1.0 + c_og * c_og + 2.0 * c_og * cos_theta) *
+                     (1.0 + c_og * c_og + 2.0 * c_og * cos_theta));
+        } else if (single_phase == 2) {
+            const double hg_forward = (1.0 - g_forward * g_forward) /
+                sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+            const double hg_backward = (1.0 - g_back * g_back) /
+                sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+            p_single = f * hg_forward + (1.0 - f) * hg_backward;
+        } else {
+            const double hg_forward = (1.0 - g_forward * g_forward) /
+                sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) *
+                     (1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta));
+            const double hg_backward = (1.0 - g_back * g_back) /
+                sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta) *
+                     (1.0 + g_back * g_back + 2.0 * g_back * cos_theta));
+            p_single = sh_ftau_cld[layer] * (f * hg_forward + (1.0 - f) * hg_backward) +
+                sh_ftau_ray[layer] * (0.75 * (1.0 + cos_theta * cos_theta));
+        }
+
+        const double ubar2 = 0.767;
+        const double phase_term = 3.0 * ubar2 * ubar2 * u1 * u1 - 1.0;
+        double multi_plus = 0.0;
+        double multi_minus = 0.0;
+        if (multi_phase == 0) {
+            multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
+            multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1 + sh_gcos2[layer] * phase_term / 2.0;
+        } else {
+            multi_plus = 1.0 + 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
+            multi_minus = 1.0 - 1.5 * sh_ftau_cld[layer] * sh_cosb[layer] * u1;
+        }
+
+        const double positive_layer = positive[layer];
+        const double negative_layer = negative[layer];
+        const double geom_A = (multi_plus * c_plus_up[layer] + multi_minus * c_minus_up[layer]) * w0_here * 0.5 / PI;
+        const double geom_G = positive_layer * (multi_plus + sh_gama[layer] * multi_minus) * w0_here * 0.5 / PI;
+        const double geom_H = negative_layer * (sh_gama[layer] * multi_plus + multi_minus) * w0_here * 0.5 / PI;
+        const double direct_term = (w0_og_here * f0pi_w / (4.0 * PI)) *
+            p_single *
+            exp(-tau_og_here * inv_u0) *
+            (1.0 - exp(-dtau_og_here * sum_u * inv_u0u1)) *
+            u0_over_sum;
+        const double source_term = geom_A * (1.0 - exp(-dtau_here * sum_u * inv_u0u1)) * u0_over_sum +
+            geom_G * (exp(exptrm[layer] - dtau_here * inv_u1) - 1.0) / (sh_lambda[layer] * u1 - 1.0) +
+            geom_H * (1.0 - exp(-(exptrm[layer] + dtau_here * inv_u1))) / (sh_lambda[layer] * u1 + 1.0);
+
+        xint = xint * exp(-dtau_here * inv_u1) + direct_term + source_term;
+    }
+
+    sh_weighted_xint[ang] = xint * combined_weights_dev[ang];
+    __syncthreads();
+    if (ang == 0) {
+        double reduced = 0.0;
+        for (int i = 0; i < nang; ++i) {
+            reduced += sh_weighted_xint[i];
+        }
+        legacy_albedo_dev[w] = PI * (cos_theta + 1.0) * reduced / F0PI_dev[w];
     }
 }

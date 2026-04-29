@@ -65,6 +65,7 @@ class ReflectedLightGPUContext:
         self._solve_kernel = None
 
         self._allocate_results()
+        self.combined_weights = None
         self._compile()
 
         self._inputs_ready = False
@@ -75,10 +76,7 @@ class ReflectedLightGPUContext:
         self._solve_kernel = self._module.get_function("reflected_solve_kernel")
 
     def _allocate_results(self):
-        if self.get_toa_intensity:
-            self.xint_at_top = cp.empty((self.nang, self.nwno), dtype=cp.float64)
-        else:
-            self.xint_at_top = cp.empty((0, 0), dtype=cp.float64)
+        self.legacy_albedo = cp.empty((self.nwno,), dtype=cp.float64)
 
         if self.get_lvl_flux:
             self.flux_minus_all = cp.empty((self.nang, self.nlevel, self.nwno), dtype=cp.float64)
@@ -121,6 +119,7 @@ class ReflectedLightGPUContext:
         self.get_lvl_flux = int(get_lvl_flux)
         self.get_toa_intensity = int(get_toa_intensity)
         self._allocate_results()
+        self.combined_weights = None
 
     def set_inputs(
         self,
@@ -150,6 +149,7 @@ class ReflectedLightGPUContext:
         constant_forward,
         toon_coefficients,
         b_top,
+        combined_weights,
     ):
         self.wno = _as_device_array(wno, "wno", ndim=1)
         self.dtau = _as_device_array(dtau, "dtau", ndim=2)
@@ -183,6 +183,11 @@ class ReflectedLightGPUContext:
         self.constant_forward = float(constant_forward)
         self.toon_coefficients = int(toon_coefficients)
         self.b_top = float(b_top)
+        self.combined_weights = _as_device_array(combined_weights, "combined_weights", ndim=1)
+        if self.combined_weights.size != self.nang:
+            raise ValueError(
+                f"combined_weights length mismatch: expected {self.nang}, got {self.combined_weights.size}."
+            )
         self._inputs_ready = True
 
     def run(self, return_host: bool = False):
@@ -228,7 +233,8 @@ class ReflectedLightGPUContext:
                 np.int32(self.get_lvl_flux),
                 np.int32(self.toon_coefficients),
                 float(self.b_top),
-                self.xint_at_top,
+                self.combined_weights,
+                self.legacy_albedo,
                 self.flux_minus_all,
                 self.flux_plus_all,
                 self.flux_minus_midpt_all,
@@ -237,10 +243,7 @@ class ReflectedLightGPUContext:
         )
 
         if return_host:
-            if self.get_toa_intensity:
-                xint = cp.asnumpy(self.xint_at_top).reshape(self.numg, self.numt, self.nwno)
-            else:
-                xint = cp.asnumpy(self.xint_at_top)
+            xint = cp.asnumpy(self.legacy_albedo)
 
             if self.get_lvl_flux:
                 fluxes = (
@@ -258,10 +261,7 @@ class ReflectedLightGPUContext:
                 )
             return xint, fluxes
 
-        if self.get_toa_intensity:
-            xint = self.xint_at_top.reshape(self.numg, self.numt, self.nwno)
-        else:
-            xint = self.xint_at_top
+        xint = self.legacy_albedo
 
         if self.get_lvl_flux:
             fluxes = (
@@ -298,7 +298,8 @@ class ReflectedLightGPUContext:
             "ubar0",
             "ubar1",
             "F0PI",
-            "xint_at_top",
+            "combined_weights",
+            "legacy_albedo",
             "flux_minus_all",
             "flux_plus_all",
             "flux_minus_midpt_all",
@@ -342,6 +343,8 @@ def get_reflected_1d(
     toon_coefficients=0,
     b_top=0.0,
     return_host=False,
+    *,
+    combined_weights,
 ):
     """Convenience wrapper mirroring the CPU no-alloc reflected API."""
 
@@ -380,5 +383,6 @@ def get_reflected_1d(
         constant_forward,
         toon_coefficients,
         b_top,
+        combined_weights=combined_weights,
     )
     return ctx.run(return_host=return_host)

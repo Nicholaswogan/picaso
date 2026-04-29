@@ -116,12 +116,7 @@ def _call_cpu_reflected(case):
     )
 
 
-def _aggregate_angle_resolved_xint(xint, gweight, tweight):
-    weights = np.outer(gweight, tweight)
-    return np.tensordot(weights, xint, axes=([0, 1], [0, 1]))
-
-
-def _set_new_gpu_inputs(ctx, case):
+def _set_new_gpu_inputs(ctx, case, combined_weights=None):
     ctx.set_inputs(
         case["wno"],
         case["dtau"],
@@ -149,7 +144,15 @@ def _set_new_gpu_inputs(ctx, case):
         case["constant_forward"],
         0,
         case["b_top"],
+        combined_weights=combined_weights,
     )
+
+
+def _reduce_cpu_xint(case, cpu_xint, gweight, tweight):
+    weights = np.outer(gweight, tweight)
+    return np.tensordot(weights, cpu_xint, axes=([0, 1], [0, 1])) * np.pi * (
+        case["cos_theta"] + 1.0
+    ) / case["F0PI"]
 
 
 def _call_legacy_gpu_reflected(case, gweight, tweight):
@@ -246,8 +249,11 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
         get_lvl_flux=0,
         get_toa_intensity=1,
     )
+    gweight = np.linspace(1.0, 1.3, case["numg"], dtype=np.float64)
+    tweight = np.ones(case["numt"], dtype=np.float64)
+    combined_weights = np.outer(gweight, tweight).flatten()
     gpu_setup_t0 = time.perf_counter()
-    _set_new_gpu_inputs(gpu_ctx, case)
+    _set_new_gpu_inputs(gpu_ctx, case, combined_weights=combined_weights)
     cp.cuda.Stream.null.synchronize()
     gpu_setup_time = time.perf_counter() - gpu_setup_t0
 
@@ -256,15 +262,16 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     cp.cuda.Stream.null.synchronize()
 
     gpu_t0 = time.perf_counter()
-    _set_new_gpu_inputs(gpu_ctx, case)
+    _set_new_gpu_inputs(gpu_ctx, case, combined_weights=combined_weights)
     gpu_xint, _ = gpu_ctx.run(return_host=True)
     cp.cuda.Stream.null.synchronize()
     gpu_time = time.perf_counter() - gpu_t0
     gpu_total_time = gpu_time
 
     speedup = cpu_time / gpu_total_time if gpu_total_time > 0 else float("inf")
-    max_abs = np.max(np.abs(cpu_xint - gpu_xint))
-    max_rel = np.max(np.abs(cpu_xint - gpu_xint) / np.maximum(np.abs(cpu_xint), 1e-15))
+    cpu_reduced = _reduce_cpu_xint(case, cpu_xint, gweight, tweight)
+    max_abs = np.max(np.abs(cpu_reduced - gpu_xint))
+    max_rel = np.max(np.abs(cpu_reduced - gpu_xint) / np.maximum(np.abs(cpu_reduced), 1e-15))
 
     print(f"CPU reflected solve: {cpu_time:.3f}s")
     print(f"GPU reflected setup: {gpu_setup_time:.3f}s")
@@ -273,7 +280,7 @@ def test_reflected_gpu_matches_cpu_and_reports_runtime():
     print(f"Max abs diff: {max_abs:.6e}")
     print(f"Max rel diff: {max_rel:.6e}")
 
-    np.testing.assert_allclose(cpu_xint, gpu_xint, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(cpu_reduced, gpu_xint, rtol=1e-6, atol=1e-8)
 
 
 def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
@@ -291,7 +298,7 @@ def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
     # Use a smaller case here: the legacy wrapper is much more brittle than the
     # new persistent GPU context and is most trustworthy when we keep the call
     # shape modest.
-    case = _make_reflected_case(nlevel=24, nwno=16_384, numg=6, numt=1)
+    case = _make_reflected_case()
     gweight = np.linspace(1.0, 1.3, case["numg"], dtype=np.float64)
     tweight = np.ones(case["numt"], dtype=np.float64)
 
@@ -303,7 +310,8 @@ def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
         get_lvl_flux=0,
         get_toa_intensity=1,
     )
-    _set_new_gpu_inputs(new_ctx, case)
+    combined_weights = np.outer(gweight, tweight).flatten()
+    _set_new_gpu_inputs(new_ctx, case, combined_weights=combined_weights)
 
     # Warm both implementations once.
     new_ctx.run(return_host=True)
@@ -311,7 +319,7 @@ def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
     _call_legacy_gpu_reflected(case, gweight, tweight)
 
     new_t0 = time.perf_counter()
-    _set_new_gpu_inputs(new_ctx, case)
+    _set_new_gpu_inputs(new_ctx, case, combined_weights=combined_weights)
     new_xint, _ = new_ctx.run(return_host=True)
     cp.cuda.Stream.null.synchronize()
     new_time = time.perf_counter() - new_t0
@@ -320,11 +328,9 @@ def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
     legacy_xint = _call_legacy_gpu_reflected(case, gweight, tweight)
     legacy_time = time.perf_counter() - legacy_t0
 
-    new_flux = _aggregate_angle_resolved_xint(new_xint, gweight, tweight)
-
     speedup = legacy_time / new_time if new_time > 0 else float("inf")
-    max_abs = np.max(np.abs(new_flux - legacy_xint))
-    max_rel = np.max(np.abs(new_flux - legacy_xint) / np.maximum(np.abs(legacy_xint), 1e-15))
+    max_abs = np.max(np.abs(new_xint - legacy_xint))
+    max_rel = np.max(np.abs(new_xint - legacy_xint) / np.maximum(np.abs(legacy_xint), 1e-15))
 
     print(f"Legacy GPU end-to-end: {legacy_time:.3f}s")
     print(f"New GPU end-to-end: {new_time:.3f}s")
@@ -334,4 +340,4 @@ def test_reflected_gpu_matches_legacy_gpu_and_reports_runtime():
 
     # The legacy path is less numerically stable than the new GPU context, so
     # this comparison is intentionally looser than the CPU parity test.
-    np.testing.assert_allclose(new_flux, legacy_xint, rtol=5e-4, atol=5e-6)
+    np.testing.assert_allclose(new_xint, legacy_xint, rtol=5e-4, atol=5e-6)
