@@ -334,7 +334,7 @@ class RadtranOpacities:
 
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
-            
+
             self._read_and_decode_opacity_block(
                 self._molecular_group[species_name],
                 ind_wv0,
@@ -428,28 +428,36 @@ def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, worksp
 
 
 @nb.njit
+def _interp_molecular_opacity(block, i_layer, i_wavelength, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight):
+    ip0 = p_ind0[i_layer]
+    ip1 = p_ind1[i_layer]
+    pw = p_weight[i_layer]
+    it0 = t_ind0[i_layer]
+    it1 = t_ind1[i_layer]
+    tw = t_weight[i_layer]
+
+    v00 = block[ip0, it0, i_wavelength]
+    v10 = block[ip1, it0, i_wavelength]
+    v01 = block[ip0, it1, i_wavelength]
+    v11 = block[ip1, it1, i_wavelength]
+
+    v0 = (1.0 - pw) * v00 + pw * v10
+    v1 = (1.0 - pw) * v01 + pw * v11
+    return (1.0 - tw) * v0 + tw * v1
+
+
+@nb.njit
 def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
     nwavelengths = block.shape[2]
     nlayers = columns_row.shape[0]
 
     for i in range(nlayers):
-        ip0 = p_ind0[i]
-        ip1 = p_ind1[i]
-        pw = p_weight[i]
-        it0 = t_ind0[i]
-        it1 = t_ind1[i]
-        tw = t_weight[i]
         column = columns_row[i]
 
         for iw in range(nwavelengths):
-            v00 = block[ip0, it0, iw]
-            v10 = block[ip1, it0, iw]
-            v01 = block[ip0, it1, iw]
-            v11 = block[ip1, it1, iw]
-
-            v0 = (1.0 - pw) * v00 + pw * v10
-            v1 = (1.0 - pw) * v01 + pw * v11
-            tau_out[iw, i] += ((1.0 - tw) * v0 + tw * v1) * column
+            tau_out[iw, i] += _interp_molecular_opacity(
+                block, i, iw, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight
+            ) * column
 
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
