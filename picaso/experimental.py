@@ -190,31 +190,6 @@ class RadtranOpacitiesWorkspace:
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
             self._allocate(nlayers, nwavelengths_per_chunk)
 
-
-@nb.njit
-def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
-    nwavelengths = block.shape[2]
-    nlayers = columns_row.shape[0]
-
-    for i in range(nlayers):
-        ip0 = p_ind0[i]
-        ip1 = p_ind1[i]
-        pw = p_weight[i]
-        it0 = t_ind0[i]
-        it1 = t_ind1[i]
-        tw = t_weight[i]
-        column = columns_row[i]
-
-        for iw in range(nwavelengths):
-            v00 = block[ip0, it0, iw]
-            v10 = block[ip1, it0, iw]
-            v01 = block[ip0, it1, iw]
-            v11 = block[ip1, it1, iw]
-
-            v0 = (1.0 - pw) * v00 + pw * v10
-            v1 = (1.0 - pw) * v01 + pw * v11
-            tau_out[iw, i] += ((1.0 - tw) * v0 + tw * v1) * column
-
 class RadtranOpacities:
 
     def __init__(self, opacity_filename):
@@ -260,6 +235,37 @@ class RadtranOpacities:
         self.ncontinuum = int(len(self.continuum_names))
         self.molecular_name_to_index = {name: i for i, name in enumerate(self.molecular_names)}
         self.continuum_name_to_index = {name: i for i, name in enumerate(self.continuum_names)}
+        self.molecular_storage_format = {}
+        self.molecular_log10_floor_by_name = {}
+        self.molecular_y_min_by_name = {}
+        self.molecular_y_max_by_name = {}
+        for name in self.molecular_names:
+            dataset = self._molecular_group[name]
+            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
+            self.molecular_storage_format[name] = storage_format
+            self.molecular_log10_floor_by_name[name] = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
+            if storage_format == "log10_uint16":
+                self.molecular_y_min_by_name[name] = float(dataset.attrs["y_min"])
+                self.molecular_y_max_by_name[name] = float(dataset.attrs["y_max"])
+            else:
+                self.molecular_y_min_by_name[name] = np.nan
+                self.molecular_y_max_by_name[name] = np.nan
+
+        self.continuum_storage_format = {}
+        self.continuum_log10_floor_by_name = {}
+        self.continuum_y_min_by_name = {}
+        self.continuum_y_max_by_name = {}
+        for name in self.continuum_names:
+            dataset = self._continuum_group[name]
+            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
+            self.continuum_storage_format[name] = storage_format
+            self.continuum_log10_floor_by_name[name] = float(dataset.attrs.get("log10_floor", self.continuum_log10_floor))
+            if storage_format == "log10_uint16":
+                self.continuum_y_min_by_name[name] = float(dataset.attrs["y_min"])
+                self.continuum_y_max_by_name[name] = float(dataset.attrs["y_max"])
+            else:
+                self.continuum_y_min_by_name[name] = np.nan
+                self.continuum_y_max_by_name[name] = np.nan
 
         self.pressure.flags.writeable = False
         self.temperature.flags.writeable = False
@@ -296,14 +302,10 @@ class RadtranOpacities:
 
             dataset = self._molecular_group[species_name]
             encoded = dataset[:, :, ind_wv0:ind_wv1]
-            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
-            log10_floor = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
-            if storage_format == "log10_uint16":
-                y_min = float(dataset.attrs["y_min"])
-                y_max = float(dataset.attrs["y_max"])
-            else:
-                y_min = np.nan
-                y_max = np.nan
+            storage_format = self.molecular_storage_format[species_name]
+            log10_floor = self.molecular_log10_floor_by_name[species_name]
+            y_min = self.molecular_y_min_by_name[species_name]
+            y_max = self.molecular_y_max_by_name[species_name]
             block = _decode_opacity_block(encoded, storage_format, log10_floor, y_min, y_max)
 
             _accumulate_molecular_tau(
@@ -386,6 +388,31 @@ def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, worksp
         workspace.continuum_temperature_ind1[i] = it1
         workspace.continuum_temperature_weight[i] = tw
 
+
+@nb.njit
+def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
+    nwavelengths = block.shape[2]
+    nlayers = columns_row.shape[0]
+
+    for i in range(nlayers):
+        ip0 = p_ind0[i]
+        ip1 = p_ind1[i]
+        pw = p_weight[i]
+        it0 = t_ind0[i]
+        it1 = t_ind1[i]
+        tw = t_weight[i]
+        column = columns_row[i]
+
+        for iw in range(nwavelengths):
+            v00 = block[ip0, it0, iw]
+            v10 = block[ip1, it0, iw]
+            v01 = block[ip0, it1, iw]
+            v11 = block[ip1, it1, iw]
+
+            v0 = (1.0 - pw) * v00 + pw * v10
+            v1 = (1.0 - pw) * v01 + pw * v11
+            tau_out[iw, i] += ((1.0 - tw) * v0 + tw * v1) * column
+            
 
 def _decode_opacity_block(encoded_block, storage_format, log10_floor, y_min, y_max):
     if storage_format == "log10_uint16":
