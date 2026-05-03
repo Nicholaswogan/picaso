@@ -17,6 +17,7 @@ AMU_CGS = 1.66053906660e-24
 G_CGS = 6.67430e-8
 M_EARTH_CGS = 5.9722e27
 R_EARTH_CGS = 6.371e8
+CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
 
 @nb.experimental.jitclass
 class Atmosphere_:
@@ -172,6 +173,7 @@ class RadtranOpacitiesWorkspace:
     continuum_temperature_ind0: nb.int64[:]
     continuum_temperature_ind1: nb.int64[:]
     continuum_temperature_weight: nb.float64[:]
+    cia_scale: nb.float64[:]
     molecular_block: nb.float64[:,:,:]
     continuum_block: nb.float64[:,:]
 
@@ -193,6 +195,7 @@ class RadtranOpacitiesWorkspace:
         self.continuum_temperature_ind0 = np.empty(nlayers, dtype=np.int64)
         self.continuum_temperature_ind1 = np.empty(nlayers, dtype=np.int64)
         self.continuum_temperature_weight = np.empty(nlayers, dtype=np.float64)
+        self.cia_scale = np.empty(nlayers, dtype=np.float64)
         self.molecular_block = np.empty((npressure, ntemperature, nwavelengths_per_chunk), dtype=np.float64)
         self.continuum_block = np.empty((ncontinuum_temperature, nwavelengths_per_chunk), dtype=np.float64)
 
@@ -290,7 +293,18 @@ class RadtranOpacities:
 
         self.workspace = RadtranOpacitiesWorkspace()
 
-    def _read_and_decode_opacity_block(self, dataset, ind_wv0, ind_wv1, storage_code, log10_floor, y_min, y_max, out):
+    def _read_and_decode_opacity_block(
+        self,
+        dataset,
+        ind_wv0,
+        ind_wv1,
+        storage_code,
+        log10_floor,
+        y_min,
+        y_max,
+        post_decode_factor,
+        out,
+    ):
         dataset.read_direct(out, source_sel=np.s_[:, :, ind_wv0:ind_wv1])
         if storage_code == 0:
             if y_max == y_min:
@@ -299,6 +313,7 @@ class RadtranOpacities:
                 out *= (y_max - y_min) / np.iinfo(np.uint16).max
                 out += y_min
         np.power(10.0, out, out=out)
+        out *= post_decode_factor
 
     def compute_opacities(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         
@@ -343,6 +358,7 @@ class RadtranOpacities:
                 self.molecular_log10_floor[i_molecular],
                 self.molecular_y_min[i_molecular],
                 self.molecular_y_max[i_molecular],
+                1.0,
                 block,
             )
 
@@ -355,6 +371,49 @@ class RadtranOpacities:
                 self.workspace.molecular_temperature_ind0,
                 self.workspace.molecular_temperature_ind1,
                 self.workspace.molecular_temperature_weight,
+                opacities_result.tau,
+            )
+
+        # Loop over CIA continuum opacities.
+        atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
+
+        for i_continuum, continuum_name in enumerate(self.continuum_names):
+            if "-" not in continuum_name:
+                continue
+
+            species_left, species_right = continuum_name.split("-", 1)
+            if species_left not in atmosphere_name_to_index or species_right not in atmosphere_name_to_index:
+                continue
+
+            i_left = atmosphere_name_to_index[species_left]
+            i_right = atmosphere_name_to_index[species_right]
+            block = self.workspace.continuum_block
+
+            self._read_and_decode_opacity_block(
+                self._continuum_group[continuum_name],
+                ind_wv0,
+                ind_wv1,
+                self.continuum_storage_format[i_continuum],
+                self.continuum_log10_floor[i_continuum],
+                self.continuum_y_min[i_continuum],
+                self.continuum_y_max[i_continuum],
+                CIA_AMAGAT_TO_MOLECULE_CM,
+                block,
+            )
+
+            _fill_cia_scale_workspace(
+                atmosphere,
+                i_left,
+                i_right,
+                self.workspace,
+            )
+
+            _accumulate_cia_tau(
+                block,
+                self.workspace.cia_scale,
+                self.workspace.continuum_temperature_ind0,
+                self.workspace.continuum_temperature_ind1,
+                self.workspace.continuum_temperature_weight,
                 opacities_result.tau,
             )
 
@@ -428,6 +487,17 @@ def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, worksp
 
 
 @nb.njit
+def _fill_cia_scale_workspace(atmosphere, i_left_species, i_right_species, workspace):
+    nlayers = atmosphere.nlayers
+    for i in range(nlayers):
+        workspace.cia_scale[i] = (
+            atmosphere.densities[i_left_species, i]
+            * atmosphere.densities[i_right_species, i]
+            * atmosphere.dz[i]
+        )
+
+
+@nb.njit
 def _interp_molecular_opacity(block, i_layer, i_wavelength, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight):
     ip0 = p_ind0[i_layer]
     ip1 = p_ind1[i_layer]
@@ -458,6 +528,28 @@ def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_in
             tau_out[iw, i] += _interp_molecular_opacity(
                 block, i, iw, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight
             ) * column
+
+
+@nb.njit
+def _interp_continuum_opacity(block, i_layer, i_wavelength, t_ind0, t_ind1, t_weight):
+    it0 = t_ind0[i_layer]
+    it1 = t_ind1[i_layer]
+    tw = t_weight[i_layer]
+
+    v0 = block[it0, i_wavelength]
+    v1 = block[it1, i_wavelength]
+    return (1.0 - tw) * v0 + tw * v1
+
+
+@nb.njit
+def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, tau_out):
+    nwavelengths = block.shape[1]
+    nlayers = continuum_scale_row.shape[0]
+
+    for i in range(nlayers):
+        scale = continuum_scale_row[i]
+        for iw in range(nwavelengths):
+            tau_out[iw, i] += _interp_continuum_opacity(block, i, iw, t_ind0, t_ind1, t_weight) * scale
 
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
