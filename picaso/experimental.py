@@ -158,8 +158,62 @@ class Star:
 
 @nb.experimental.jitclass
 class RadtranOpacitiesWorkspace:
-    "Any needed workspace can go here"
-    pass
+    nlayers: nb.int64
+    nwavelengths_per_chunk: nb.int64
+    molecular_pressure_ind0: nb.int64[:]
+    molecular_pressure_ind1: nb.int64[:]
+    molecular_pressure_weight: nb.float64[:]
+    molecular_temperature_ind0: nb.int64[:]
+    molecular_temperature_ind1: nb.int64[:]
+    molecular_temperature_weight: nb.float64[:]
+    continuum_temperature_ind0: nb.int64[:]
+    continuum_temperature_ind1: nb.int64[:]
+    continuum_temperature_weight: nb.float64[:]
+
+    def __init__(self):
+        self._allocate(0, 0)
+
+    def _allocate(self, nlayers, nwavelengths_per_chunk):
+        self.nlayers = nlayers
+        self.nwavelengths_per_chunk = nwavelengths_per_chunk
+        self.molecular_pressure_ind0 = np.empty(nlayers, dtype=np.int64)
+        self.molecular_pressure_ind1 = np.empty(nlayers, dtype=np.int64)
+        self.molecular_pressure_weight = np.empty(nlayers, dtype=np.float64)
+        self.molecular_temperature_ind0 = np.empty(nlayers, dtype=np.int64)
+        self.molecular_temperature_ind1 = np.empty(nlayers, dtype=np.int64)
+        self.molecular_temperature_weight = np.empty(nlayers, dtype=np.float64)
+        self.continuum_temperature_ind0 = np.empty(nlayers, dtype=np.int64)
+        self.continuum_temperature_ind1 = np.empty(nlayers, dtype=np.int64)
+        self.continuum_temperature_weight = np.empty(nlayers, dtype=np.float64)
+
+    def _ensure(self, nlayers, nwavelengths_per_chunk):
+        if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
+            self._allocate(nlayers, nwavelengths_per_chunk)
+
+
+@nb.njit
+def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
+    nwavelengths = block.shape[2]
+    nlayers = columns_row.shape[0]
+
+    for i in range(nlayers):
+        ip0 = p_ind0[i]
+        ip1 = p_ind1[i]
+        pw = p_weight[i]
+        it0 = t_ind0[i]
+        it1 = t_ind1[i]
+        tw = t_weight[i]
+        column = columns_row[i]
+
+        for iw in range(nwavelengths):
+            v00 = block[ip0, it0, iw]
+            v10 = block[ip1, it0, iw]
+            v01 = block[ip0, it1, iw]
+            v11 = block[ip1, it1, iw]
+
+            v0 = (1.0 - pw) * v00 + pw * v10
+            v1 = (1.0 - pw) * v01 + pw * v11
+            tau_out[iw, i] += ((1.0 - tw) * v0 + tw * v1) * column
 
 class RadtranOpacities:
 
@@ -204,15 +258,65 @@ class RadtranOpacities:
         self.ncontinuum_temperature = int(self.continuum_temperatures.size)
         self.nmolecular = int(len(self.molecular_names))
         self.ncontinuum = int(len(self.continuum_names))
+        self.molecular_name_to_index = {name: i for i, name in enumerate(self.molecular_names)}
+        self.continuum_name_to_index = {name: i for i, name in enumerate(self.continuum_names)}
 
         self.pressure.flags.writeable = False
         self.temperature.flags.writeable = False
         self.wavelength.flags.writeable = False
         self.continuum_temperatures.flags.writeable = False
 
+        self.workspace = RadtranOpacitiesWorkspace()
+
     def compute_opacities(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         
-        pass
+        # Ensure workspace and result space is allocated
+        self.workspace._ensure(atmosphere.nlayers, ind_wv1 - ind_wv0)
+        opacities_result._ensure(atmosphere.nlayers, ind_wv1 - ind_wv0)
+        opacities_result.tau[:] = 0.0
+
+        # Get interpolation indicies
+        _fill_molecular_interpolation_workspace(
+            atmosphere,
+            self.pressure,
+            self.temperature,
+            self.workspace,
+        )
+        _fill_continuum_interpolation_workspace(
+            atmosphere,
+            self.continuum_temperatures,
+            self.workspace,
+        )
+
+        # Loop over atmospheric species and accumulate molecular opacities.
+        for i_species in range(atmosphere.nspecies):
+            species_name = str(atmosphere.species_names[i_species])
+            if species_name not in self.molecular_name_to_index:
+                continue
+
+            dataset = self._molecular_group[species_name]
+            encoded = dataset[:, :, ind_wv0:ind_wv1]
+            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
+            log10_floor = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
+            if storage_format == "log10_uint16":
+                y_min = float(dataset.attrs["y_min"])
+                y_max = float(dataset.attrs["y_max"])
+            else:
+                y_min = np.nan
+                y_max = np.nan
+            block = _decode_opacity_block(encoded, storage_format, log10_floor, y_min, y_max)
+
+            _accumulate_molecular_tau(
+                block,
+                atmosphere.columns[i_species],
+                self.workspace.molecular_pressure_ind0,
+                self.workspace.molecular_pressure_ind1,
+                self.workspace.molecular_pressure_weight,
+                self.workspace.molecular_temperature_ind0,
+                self.workspace.molecular_temperature_ind1,
+                self.workspace.molecular_temperature_weight,
+                opacities_result.tau,
+            )
 
 
     def close(self) -> None:
@@ -236,6 +340,67 @@ class RadtranOpacities:
         except Exception:
             pass
 
+
+@nb.njit
+def _bracket_1d(grid, value):
+    ngrid = grid.shape[0]
+    if value <= grid[0]:
+        return 0, 0, 0.0
+    if value >= grid[ngrid - 1]:
+        return ngrid - 1, ngrid - 1, 0.0
+
+    lo = 0
+    hi = ngrid - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if value < grid[mid]:
+            hi = mid
+        else:
+            lo = mid
+
+    weight = (value - grid[lo]) / (grid[hi] - grid[lo])
+    return lo, hi, weight
+
+
+@nb.njit
+def _fill_molecular_interpolation_workspace(atmosphere, pressure_grid, temperature_grid, workspace):
+    nlayers = atmosphere.nlayers
+    for i in range(nlayers):
+        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.pressures[i])
+        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
+
+        workspace.molecular_pressure_ind0[i] = ip0
+        workspace.molecular_pressure_ind1[i] = ip1
+        workspace.molecular_pressure_weight[i] = pw
+        workspace.molecular_temperature_ind0[i] = it0
+        workspace.molecular_temperature_ind1[i] = it1
+        workspace.molecular_temperature_weight[i] = tw
+
+
+@nb.njit
+def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, workspace):
+    nlayers = atmosphere.nlayers
+    for i in range(nlayers):
+        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
+        workspace.continuum_temperature_ind0[i] = it0
+        workspace.continuum_temperature_ind1[i] = it1
+        workspace.continuum_temperature_weight[i] = tw
+
+
+def _decode_opacity_block(encoded_block, storage_format, log10_floor, y_min, y_max):
+    if storage_format == "log10_uint16":
+        if y_max == y_min:
+            log_block = np.full(encoded_block.shape, y_min, dtype=np.float64)
+        else:
+            scaled = np.asarray(encoded_block, dtype=np.float64) / np.iinfo(np.uint16).max
+            log_block = scaled * (y_max - y_min) + y_min
+    elif storage_format == "log10_float32":
+        log_block = np.asarray(encoded_block, dtype=np.float64)
+    else:
+        raise ValueError(f"Unsupported storage format {storage_format!r}")
+    return np.power(10.0, log_block)
+
+
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
 
@@ -251,12 +416,12 @@ class RadtranOpacitiesResult:
 
     def _allocate(self, nlayers, nwavelengths_per_chunk):
         self.nlayers = nlayers
-        self.nwavelength_per_chunk = nwavelengths_per_chunk
+        self.nwavelengths_per_chunk = nwavelengths_per_chunk
         self.tau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
-    def _ensure(self, nlayers, nwavelength_per_chunk):
+    def _ensure(self, nlayers, nwavelengths_per_chunk):
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
-            self._allocate(nlayers, nwavelength_per_chunk)
+            self._allocate(nlayers, nwavelengths_per_chunk)
 
 @nb.experimental.jitclass
 class RadtranAtmosphere:
