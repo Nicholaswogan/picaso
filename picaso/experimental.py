@@ -158,20 +158,8 @@ class Star:
 
 @nb.experimental.jitclass
 class RadtranOpacitiesWorkspace:
-
-    # Dimensions
-    nlayer : nb.int64
-    nwavelength_per_chunk : nb.int64
-
-    # 
-    tau : nb.float64[:,:]
-
-    def __init__(self, nlayer, nwavelength_per_chunk):
-
-        self.nlayer = nlayer
-        self.nwavelength_per_chunk = nwavelength_per_chunk
-        self.tau = np.empty((nwavelength_per_chunk,nlayer), dtype=np.float64)
-
+    "Any needed workspace can go here"
+    pass
 
 class RadtranOpacities:
 
@@ -222,6 +210,11 @@ class RadtranOpacities:
         self.wavelength.flags.writeable = False
         self.continuum_temperatures.flags.writeable = False
 
+    def compute_opacities(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+        
+        pass
+
+
     def close(self) -> None:
         if getattr(self, "file", None) is not None:
             self.file.close()
@@ -242,6 +235,28 @@ class RadtranOpacities:
             self.close()
         except Exception:
             pass
+
+@nb.experimental.jitclass
+class RadtranOpacitiesResult:
+
+    # Dimensions
+    nlayers : nb.int64
+    nwavelengths_per_chunk : nb.int64
+
+    # Tau, etc.
+    tau : nb.float64[:,:]
+
+    def __init__(self):
+        self._allocate(0, 0)
+
+    def _allocate(self, nlayers, nwavelengths_per_chunk):
+        self.nlayers = nlayers
+        self.nwavelength_per_chunk = nwavelengths_per_chunk
+        self.tau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+
+    def _ensure(self, nlayers, nwavelength_per_chunk):
+        if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
+            self._allocate(nlayers, nwavelength_per_chunk)
 
 @nb.experimental.jitclass
 class RadtranAtmosphere:
@@ -377,10 +392,18 @@ class RadtranAtmosphere:
 class Radtran:
     "Radiative-transfer driver."
 
-    def __init__(self, opacity_filename: str, nwavelength_per_chunk=4096):
+    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096):
 
         # Opacities
         self.opacities = RadtranOpacities(opacity_filename)
+        self.opacities_result = RadtranOpacitiesResult()
+
+        # Work out the wavelength chunking
+        self.nwavelengths_per_chunk = nwavelengths_per_chunk
+        if self.nwavelengths_per_chunk <= 0:
+            raise ValueError("nwavelengths_per_chunk must be positive")
+        # Number of wavelength chunks
+        self.nwavelength_chunks = (self.opacities.nwavelength + self.nwavelengths_per_chunk - 1) // self.nwavelengths_per_chunk
 
         # Atmosphere
         self.atmosphere = RadtranAtmosphere()
@@ -389,9 +412,9 @@ class Radtran:
         "Setup atmospheric grid."
         self.atmosphere.setup(atm._atm, planet)
 
-    def _compute_opacity(self):
+    def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
-        pass
+        self.opacities.compute_opacity(self.atmosphere, ind_wv0, ind_wv1, self.opacities_result)
 
     def _radiate(self, calculation):
         "Do the radiative transfer."
@@ -399,16 +422,18 @@ class Radtran:
 
     def spectrum(self, atm: Atmosphere, planet: Planet, clouds: Clouds=None, star: Star=None, calculation='thermal'):
 
-        if calculation is not 'thermal':
+        if calculation != 'thermal':
             raise ValueError()
         
         # Setup the atmospheric grid.
         self._setup_atmosphere(atm, planet)
 
         for i in range(self.nwavelength_chunks):
+            ind_wv0 = i * self.nwavelengths_per_chunk
+            ind_wv1 = min(ind_wv0 + self.nwavelengths_per_chunk, self.opacities.nwavelength)
             
             # Compute opacity for the wavelength chunk
-            self._compute_opacity()
+            self._compute_opacity(ind_wv0, ind_wv1)
 
             # Do the RT for the wavelength chunk
             self._radiate(calculation)
