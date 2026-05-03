@@ -235,37 +235,37 @@ class RadtranOpacities:
         self.ncontinuum = int(len(self.continuum_names))
         self.molecular_name_to_index = {name: i for i, name in enumerate(self.molecular_names)}
         self.continuum_name_to_index = {name: i for i, name in enumerate(self.continuum_names)}
-        self.molecular_storage_format = {}
-        self.molecular_log10_floor_by_name = {}
-        self.molecular_y_min_by_name = {}
-        self.molecular_y_max_by_name = {}
-        for name in self.molecular_names:
+        self.molecular_storage_format = np.empty(self.nmolecular, dtype=np.int64)
+        self.molecular_log10_floor = np.empty(self.nmolecular, dtype=np.float64)
+        self.molecular_y_min = np.empty(self.nmolecular, dtype=np.float64)
+        self.molecular_y_max = np.empty(self.nmolecular, dtype=np.float64)
+        for i, name in enumerate(self.molecular_names):
             dataset = self._molecular_group[name]
             storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
-            self.molecular_storage_format[name] = storage_format
-            self.molecular_log10_floor_by_name[name] = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
+            self.molecular_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
+            self.molecular_log10_floor[i] = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
             if storage_format == "log10_uint16":
-                self.molecular_y_min_by_name[name] = float(dataset.attrs["y_min"])
-                self.molecular_y_max_by_name[name] = float(dataset.attrs["y_max"])
+                self.molecular_y_min[i] = float(dataset.attrs["y_min"])
+                self.molecular_y_max[i] = float(dataset.attrs["y_max"])
             else:
-                self.molecular_y_min_by_name[name] = np.nan
-                self.molecular_y_max_by_name[name] = np.nan
+                self.molecular_y_min[i] = np.nan
+                self.molecular_y_max[i] = np.nan
 
-        self.continuum_storage_format = {}
-        self.continuum_log10_floor_by_name = {}
-        self.continuum_y_min_by_name = {}
-        self.continuum_y_max_by_name = {}
-        for name in self.continuum_names:
+        self.continuum_storage_format = np.empty(self.ncontinuum, dtype=np.int64)
+        self.continuum_log10_floor = np.empty(self.ncontinuum, dtype=np.float64)
+        self.continuum_y_min = np.empty(self.ncontinuum, dtype=np.float64)
+        self.continuum_y_max = np.empty(self.ncontinuum, dtype=np.float64)
+        for i, name in enumerate(self.continuum_names):
             dataset = self._continuum_group[name]
             storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
-            self.continuum_storage_format[name] = storage_format
-            self.continuum_log10_floor_by_name[name] = float(dataset.attrs.get("log10_floor", self.continuum_log10_floor))
+            self.continuum_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
+            self.continuum_log10_floor[i] = float(dataset.attrs.get("log10_floor", self.continuum_log10_floor))
             if storage_format == "log10_uint16":
-                self.continuum_y_min_by_name[name] = float(dataset.attrs["y_min"])
-                self.continuum_y_max_by_name[name] = float(dataset.attrs["y_max"])
+                self.continuum_y_min[i] = float(dataset.attrs["y_min"])
+                self.continuum_y_max[i] = float(dataset.attrs["y_max"])
             else:
-                self.continuum_y_min_by_name[name] = np.nan
-                self.continuum_y_max_by_name[name] = np.nan
+                self.continuum_y_min[i] = np.nan
+                self.continuum_y_max[i] = np.nan
 
         self.pressure.flags.writeable = False
         self.temperature.flags.writeable = False
@@ -300,12 +300,14 @@ class RadtranOpacities:
             if species_name not in self.molecular_name_to_index:
                 continue
 
+            i_molecular = self.molecular_name_to_index[species_name]
+
             dataset = self._molecular_group[species_name]
             encoded = dataset[:, :, ind_wv0:ind_wv1]
-            storage_format = self.molecular_storage_format[species_name]
-            log10_floor = self.molecular_log10_floor_by_name[species_name]
-            y_min = self.molecular_y_min_by_name[species_name]
-            y_max = self.molecular_y_max_by_name[species_name]
+            storage_format = self.molecular_storage_format[i_molecular]
+            log10_floor = self.molecular_log10_floor[i_molecular]
+            y_min = self.molecular_y_min[i_molecular]
+            y_max = self.molecular_y_max[i_molecular]
             block = _decode_opacity_block(encoded, storage_format, log10_floor, y_min, y_max)
 
             _accumulate_molecular_tau(
