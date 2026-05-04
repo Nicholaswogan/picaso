@@ -266,9 +266,13 @@ def get_thermal_1d_w(
         g2[i] = w0[i] * (1.0 - cosb[i])
 
     for i in range(nlayer):
-        lamda_i = np.sqrt(g1[i] * g1[i] - g2[i] * g2[i])
+        if g2[i] == 0.0:
+            lamda_i = g1[i]
+            gama[i] = 0.0
+        else:
+            lamda_i = np.sqrt(g1[i] * g1[i] - g2[i] * g2[i])
+            gama[i] = (g1[i] - lamda_i) / g2[i]
         lamda[i] = lamda_i
-        gama[i] = (g1[i] - lamda_i) / g2[i]
 
         exptrm_val = _clamp_expterm(lamda_i * dtau[i])
         exptrm[i] = exptrm_val

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Comment below helps ignore linting false-positives.
 # type: ignore
 
@@ -33,7 +35,7 @@ class Atmosphere_:
     pressures: nb.float64[:]
     temperatures: nb.float64[:]
     mixing_ratios: nb.float64[:,:]
-    reference_pressure: np.float64
+    reference_pressure: nb.float64
 
     def __init__(self, species_names, pressures, temperatures, mixing_ratios, reference_pressure):
         
@@ -121,7 +123,13 @@ class Atmosphere:
             raise TypeError(f"species_names must be a list, got {type(species_names)!r}")
 
         # Initialize most terms
-        atm = Atmosphere_(typed.List(species_names), pressures, temperatures, mixing_ratios)
+        atm = Atmosphere_(
+            typed.List(species_names),
+            pressures,
+            temperatures,
+            mixing_ratios,
+            reference_pressure,
+        )
 
         if species_mu is None:
             # Get mu for each species
@@ -372,15 +380,30 @@ class RadtranOpacities:
         post_decode_factor,
         out,
     ):
-        dataset.read_direct(out, source_sel=np.s_[:, :, ind_wv0:ind_wv1])
+        if out.ndim == 3:
+            dataset.read_direct(
+                out,
+                source_sel=np.s_[:, :, ind_wv0:ind_wv1],
+                dest_sel=np.s_[:, :, : ind_wv1 - ind_wv0],
+            )
+            chunk = out[:, :, : ind_wv1 - ind_wv0]
+        elif out.ndim == 2:
+            dataset.read_direct(
+                out,
+                source_sel=np.s_[:, ind_wv0:ind_wv1],
+                dest_sel=np.s_[:, : ind_wv1 - ind_wv0],
+            )
+            chunk = out[:, : ind_wv1 - ind_wv0]
+        else:
+            raise ValueError(f"unsupported opacity block ndim {out.ndim}")
         if storage_code == 0:
             if y_max == y_min:
-                out[:] = y_min
+                chunk[:] = y_min
             else:
-                out *= (y_max - y_min) / np.iinfo(np.uint16).max
-                out += y_min
-        np.power(10.0, out, out=out)
-        out *= post_decode_factor
+                chunk *= (y_max - y_min) / np.iinfo(np.uint16).max
+                chunk += y_min
+        np.power(10.0, chunk, out=chunk)
+        chunk *= post_decode_factor
 
     def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
@@ -400,7 +423,7 @@ class RadtranOpacities:
                 continue
 
             i_molecular = self.molecular_name_to_index[species_name]
-            block = self.workspace.molecular_block[:, :, :chunk_width]
+            block = self.workspace.molecular_block
 
             self._read_and_decode_opacity_block(
                 self._molecular_group[species_name],
@@ -415,7 +438,7 @@ class RadtranOpacities:
             )
 
             _accumulate_molecular_tau(
-                block,
+                block[:, :, :chunk_width],
                 atmosphere.columns[i_species],
                 self.workspace.molecular_pressure_ind0,
                 self.workspace.molecular_pressure_ind1,
@@ -439,7 +462,7 @@ class RadtranOpacities:
 
             i_left = atmosphere_name_to_index[species_left]
             i_right = atmosphere_name_to_index[species_right]
-            block = self.workspace.continuum_block[:, :chunk_width]
+            block = self.workspace.continuum_block
 
             self._read_and_decode_opacity_block(
                 self._continuum_group[continuum_name],
@@ -461,7 +484,7 @@ class RadtranOpacities:
             )
 
             _accumulate_cia_tau(
-                block,
+                block[:, :chunk_width],
                 self.workspace.cia_scale,
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
@@ -470,7 +493,7 @@ class RadtranOpacities:
             )
 
         # For now w0 and cosb are zero.
-        opacities_result.w0[:chunk_width, :] = 0.0
+        opacities_result.w0[:chunk_width, :] = 1.0e-8
         opacities_result.cosb[:chunk_width, :] = 0.0
 
 
@@ -654,7 +677,7 @@ class RadtranAtmosphere:
     pressures: nb.float64[:]
     temperatures: nb.float64[:]
     mixing_ratios: nb.float64[:,:]
-    reference_pressure: np.float64
+    reference_pressure: nb.float64
 
     z: nb.float64[:]
     z_edge: nb.float64[:]
