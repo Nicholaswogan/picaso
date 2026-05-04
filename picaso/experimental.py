@@ -11,6 +11,8 @@ import numpy as np
 import numba as nb
 from numba import typed
 
+from .experimental_fluxes import ThermalResult, ThermalSolver
+
 # cgs constants for the compiled hydrostatic setup
 KB_CGS = 1.380649e-16
 AMU_CGS = 1.66053906660e-24
@@ -739,6 +741,10 @@ class Radtran:
 
         # Atmosphere
         self.atmosphere = RadtranAtmosphere()
+
+        # Solvers
+        self.ThermalSolver = ThermalSolver()
+        self.ThermalResult = ThermalResult()
 
     def _setup_atmosphere(self, atm: Atmosphere, planet: Planet):
         "Setup atmospheric grid."

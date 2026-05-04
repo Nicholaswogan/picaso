@@ -140,9 +140,9 @@ class ThermalSolver:
     flux_at_top: nb.float64[:, :, :]
     workspace: types.ListType(ThermalWorkspaceType)
 
-    def __init__(self, nlevel, nwno, numg, numt):
-        self._allocate_results(nlevel, nwno, numg, numt)
-        self._allocate_workspace(nlevel)
+    def __init__(self):
+        self._allocate_results(0, 0, 0, 0)
+        self._allocate_workspace(0)
 
     def _allocate_results(self, nlevel, nwno, numg, numt):
         self.nlevel = nlevel
