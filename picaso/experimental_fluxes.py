@@ -132,7 +132,7 @@ class GetThermal1D:
         self.nwno = nwno
         self.numg = numg
         self.numt = numt
-        self.flux_at_top = np.empty((numg, numt, nwno), dtype=np.float64)
+        self.flux_at_top = np.empty((nwno, numg, numt), dtype=np.float64)
 
     def _ensure_results(self, nlevel, nwno, numg, numt):
         ok = self.nlevel == nlevel
@@ -162,7 +162,7 @@ class GetThermal1D:
 @nb.njit(parallel=True)
 def get_thermal_1d(
     nlevel,
-    wno,
+    wavelength_um,
     nwno,
     numg,
     numt,
@@ -182,6 +182,9 @@ def get_thermal_1d(
 
     This first pass only supports spectrum mode (``calc_type == 0``) and
     returns the top-of-atmosphere flux on the Gauss/Chebyshev grid.
+
+    The opacity inputs are expected to be chunk-major, with shape
+    ``(nwno, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
     """
     if calc_type != 0:
         raise ValueError("experimental_fluxes.get_thermal_1d only supports calc_type=0 spectrum mode")
@@ -198,16 +201,16 @@ def get_thermal_1d(
             nlevel,
             numg,
             numt,
-            wno[iw],
+            wavelength_um[iw],
             tlevel,
-            dtau[:, iw],
-            w0[:, iw],
-            cosb[:, iw],
+            dtau[iw, :],
+            w0[iw, :],
+            cosb[iw, :],
             plevel,
             ubar1,
             surf_reflect[iw],
             hard_surface,
-            thermal.flux_at_top[:, :, iw],
+            thermal.flux_at_top[iw, :, :],
         )
 
     return thermal.flux_at_top
@@ -219,7 +222,7 @@ def get_thermal_1d_w(
     nlevel,
     numg,
     numt,
-    wno,
+    wavelength_um,
     tlevel,
     dtau,
     w0,
@@ -234,6 +237,7 @@ def get_thermal_1d_w(
     nlayer = nlevel - 1
     mu1 = 0.5
     twopi = 2.0 * np.pi
+    wno = 1.0e4 / wavelength_um
 
     bb = wrk.bb
     b1 = wrk.b1

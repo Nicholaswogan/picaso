@@ -18,6 +18,7 @@ def _make_thermal_case():
         nwno=3,
         numg=2,
         numt=2,
+        wavelength_um=np.array([20.0, 13.333333333333334, 10.0]),
         wno=np.array([500.0, 750.0, 1000.0]),
         tlevel=np.array([900.0, 1000.0, 1100.0, 1200.0]),
         dtau=np.array(
@@ -75,16 +76,20 @@ def _call_legacy(case, hard_surface):
 
 
 def _call_experimental(case, hard_surface):
+    dtau = case["dtau"].T.copy()
+    w0 = case["w0"].T.copy()
+    cosb = case["cosb"].T.copy()
+
     return experimental_fluxes.get_thermal_1d(
         case["nlevel"],
-        case["wno"].copy(),
+        case["wavelength_um"].copy(),
         case["nwno"],
         case["numg"],
         case["numt"],
         case["tlevel"].copy(),
-        case["dtau"].copy(),
-        case["w0"].copy(),
-        case["cosb"].copy(),
+        dtau,
+        w0,
+        cosb,
         case["plevel"].copy(),
         case["ubar1"].copy(),
         case["surf_reflect"].copy(),
@@ -100,5 +105,5 @@ def test_experimental_thermal_toa_parity(hard_surface):
     expected = _call_legacy(case, hard_surface)
     actual = _call_experimental(case, hard_surface)
 
-    assert actual.shape == (case["numg"], case["numt"], case["nwno"])
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    assert actual.shape == (case["nwno"], case["numg"], case["numt"])
+    np.testing.assert_allclose(actual, expected.transpose(2, 0, 1), rtol=1e-12, atol=1e-12)
