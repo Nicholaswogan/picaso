@@ -156,7 +156,7 @@ class ThermalSolver:
 def get_thermal_1d(
     self,
     nlevel,
-    nwno,
+    nwavelengths_in_chunk,
     ind_wv0,
     ind_wv1,
     nwavelengths,
@@ -181,13 +181,13 @@ def get_thermal_1d(
     returns the top-of-atmosphere flux on the Gauss/Chebyshev grid.
 
     The opacity inputs are expected to be chunk-major, with shape
-    ``(nwno, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
+    ``(nwavelengths_in_chunk, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
     """
 
     self._ensure(nlevel)
     result._ensure(nwavelengths)
 
-    for iw in nb.prange(nwno):
+    for iw in nb.prange(nwavelengths_in_chunk):
         out_iw = ind_wv0 + iw
         result.wavelength_um[out_iw] = wavelength_um[iw]
         result.thermal[out_iw] = get_thermal_1d_w(
