@@ -800,7 +800,7 @@ class RadtranAtmosphere:
 class Radtran:
     "Radiative-transfer driver."
 
-    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096, settings_kwargs=None):
+    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=None, settings_kwargs=None):
 
         # Opacities
         self.opacities = RadtranOpacities(opacity_filename)
@@ -808,6 +808,8 @@ class Radtran:
 
         # Work out the wavelength chunking
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
+        if self.nwavelengths_per_chunk is None:
+            self.nwavelengths_per_chunk = self.opacities.nwavelength
         if self.nwavelengths_per_chunk <= 0:
             raise ValueError("nwavelengths_per_chunk must be positive")
         # Number of wavelength chunks
