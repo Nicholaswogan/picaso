@@ -134,15 +134,13 @@ class ThermalSolver:
     """Persistent thermal solver state and TOA flux outputs."""
 
     nlevel: nb.int64
-    nwno: nb.int64
     workspace: types.ListType(ThermalWorkspaceType)
 
     def __init__(self):
-        self._allocate(0, 0)
+        self._allocate(0)
 
-    def _allocate(self, nlevel, nwno):
+    def _allocate(self, nlevel):
         self.nlevel = nlevel
-        self.nwno = nwno
         nthreads = nb.get_num_threads()
         self.workspace = typed.List.empty_list(ThermalWorkspaceType)
         if nlevel <= 0:
@@ -150,9 +148,9 @@ class ThermalSolver:
         for _ in range(nthreads):
             self.workspace.append(ThermalWorkspace(nlevel))
 
-    def _ensure(self, nlevel, nwno):
-        if nlevel != self.nlevel or nwno != self.nwno or len(self.workspace) != nb.get_num_threads():
-            self._allocate(nlevel, nwno)
+    def _ensure(self, nlevel):
+        if nlevel != self.nlevel or len(self.workspace) != nb.get_num_threads():
+            self._allocate(nlevel)
 
 @nb.njit(parallel=True)
 def get_thermal_1d(
@@ -186,7 +184,7 @@ def get_thermal_1d(
     ``(nwno, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
     """
 
-    self._ensure(nlevel, nwno)
+    self._ensure(nlevel)
     result._ensure(nwavelengths)
 
     for iw in nb.prange(nwno):
