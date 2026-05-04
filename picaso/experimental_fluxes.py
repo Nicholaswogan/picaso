@@ -51,7 +51,7 @@ def _clamp_expterm(value):
 
 
 @nb.experimental.jitclass
-class GetThermal1DWorkspace:
+class ThermalWorkspace:
     """Per-thread scratch space for the thermal 1D solver."""
 
     nlevel: nb.int64
@@ -108,12 +108,29 @@ class GetThermal1DWorkspace:
         if nlevel != self.nlevel:
             self._allocate(nlevel)
 
-
-GetThermal1DWorkspaceType = GetThermal1DWorkspace.class_type.instance_type
-
+ThermalWorkspaceType = ThermalWorkspace.class_type.instance_type
 
 @nb.experimental.jitclass
-class GetThermal1D:
+class ThermalResult:
+
+    nwavelengths: nb.int64
+    wavelength: nb.float64[:] # Wavelengths in microns
+    flux: nb.float64[:] # TOA flux in CGS units
+
+    def __init__(self):
+        self._allocate(0)
+
+    def _allocate(self, nwavelengths):
+        self.nwavelengths = nwavelengths
+        self.wavelength = np.empty(nwavelengths, dtype=np.float64)
+        self.flux = np.empty(nwavelengths, dtype=np.float64)
+
+    def _ensure(self, nwavelengths):
+        if nwavelengths != self.nwavelengths:
+            self._allocate(nwavelengths)
+
+@nb.experimental.jitclass
+class ThermalSolver:
     """Persistent thermal solver state and TOA flux outputs."""
 
     nlevel: nb.int64
@@ -121,7 +138,7 @@ class GetThermal1D:
     numg: nb.int64
     numt: nb.int64
     flux_at_top: nb.float64[:, :, :]
-    workspace: types.ListType(GetThermal1DWorkspaceType)
+    workspace: types.ListType(ThermalWorkspaceType)
 
     def __init__(self, nlevel, nwno, numg, numt):
         self._allocate_results(nlevel, nwno, numg, numt)
@@ -144,9 +161,9 @@ class GetThermal1D:
 
     def _allocate_workspace(self, nlevel):
         nthreads = nb.get_num_threads()
-        self.workspace = typed.List.empty_list(GetThermal1DWorkspaceType)
+        self.workspace = typed.List.empty_list(ThermalWorkspaceType)
         for _ in range(nthreads):
-            self.workspace.append(GetThermal1DWorkspace(nlevel))
+            self.workspace.append(ThermalWorkspace(nlevel))
 
     def _ensure_workspace(self, nlevel):
         if len(self.workspace) < 1:
@@ -158,25 +175,23 @@ class GetThermal1D:
         self._ensure_results(nlevel, nwno, numg, numt)
         self._ensure_workspace(nlevel)
 
-
 @nb.njit(parallel=True)
 def get_thermal_1d(
+    self,
     nlevel,
-    wavelength_um,
     nwno,
     numg,
     numt,
-    tlevel,
+    wavelength_um,
     dtau,
     w0,
     cosb,
+    tlevel,
     plevel,
     ubar1,
     surf_reflect,
     hard_surface,
-    dwno,
-    calc_type,
-    thermal=None,
+    result,
 ):
     """Compute TOA thermal fluxes for a single atmosphere.
 
@@ -186,34 +201,28 @@ def get_thermal_1d(
     The opacity inputs are expected to be chunk-major, with shape
     ``(nwno, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
     """
-    if calc_type != 0:
-        raise ValueError("experimental_fluxes.get_thermal_1d only supports calc_type=0 spectrum mode")
 
-    if thermal is None:
-        thermal = GetThermal1D(nlevel, nwno, numg, numt)
-    else:
-        thermal._ensure(nlevel, nwno, numg, numt)
+    self._ensure(nlevel, nwno, numg, numt)
 
     for iw in nb.prange(nwno):
-        wrk = thermal.workspace[nb.get_thread_id()]
         get_thermal_1d_w(
-            wrk,
+            self.workspace[nb.get_thread_id()],
             nlevel,
             numg,
             numt,
             wavelength_um[iw],
-            tlevel,
             dtau[iw, :],
             w0[iw, :],
             cosb[iw, :],
+            tlevel,
             plevel,
             ubar1,
             surf_reflect[iw],
             hard_surface,
-            thermal.flux_at_top[iw, :, :],
+            self.flux_at_top[iw, :, :],
         )
 
-    return thermal.flux_at_top
+    return self.flux_at_top
 
 
 @nb.njit
@@ -223,10 +232,10 @@ def get_thermal_1d_w(
     numg,
     numt,
     wavelength_um,
-    tlevel,
     dtau,
     w0,
     cosb,
+    tlevel,
     plevel,
     ubar1,
     surf_reflect,

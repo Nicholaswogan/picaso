@@ -79,23 +79,30 @@ def _call_experimental(case, hard_surface):
     dtau = case["dtau"].T.copy()
     w0 = case["w0"].T.copy()
     cosb = case["cosb"].T.copy()
-
-    return experimental_fluxes.get_thermal_1d(
+    solver = experimental_fluxes.ThermalSolver(
         case["nlevel"],
-        case["wavelength_um"].copy(),
         case["nwno"],
         case["numg"],
         case["numt"],
-        case["tlevel"].copy(),
+    )
+    result = experimental_fluxes.ThermalResult()
+
+    return experimental_fluxes.get_thermal_1d(
+        solver,
+        case["nlevel"],
+        case["nwno"],
+        case["numg"],
+        case["numt"],
+        case["wavelength_um"].copy(),
         dtau,
         w0,
         cosb,
+        case["tlevel"].copy(),
         case["plevel"].copy(),
         case["ubar1"].copy(),
         case["surf_reflect"].copy(),
         hard_surface,
-        case["dwno"],
-        0,
+        result,
     )
 
 
