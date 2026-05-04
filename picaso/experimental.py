@@ -1,7 +1,7 @@
-from __future__ import annotations
-
 # Comment below helps ignore linting false-positives.
 # type: ignore
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
