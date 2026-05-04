@@ -159,6 +159,9 @@ def get_thermal_1d(
     self,
     nlevel,
     nwno,
+    ind_wv0,
+    ind_wv1,
+    nwavelengths,
     numg,
     numt,
     gweight,
@@ -184,11 +187,12 @@ def get_thermal_1d(
     """
 
     self._ensure(nlevel, nwno)
-    result._ensure(nwno)
+    result._ensure(nwavelengths)
 
     for iw in nb.prange(nwno):
-        result.wavelength_um[iw] = wavelength_um[iw]
-        result.thermal[iw] = get_thermal_1d_w(
+        out_iw = ind_wv0 + iw
+        result.wavelength_um[out_iw] = wavelength_um[iw]
+        result.thermal[out_iw] = get_thermal_1d_w(
             self.workspace[nb.get_thread_id()],
             nlevel,
             numg,

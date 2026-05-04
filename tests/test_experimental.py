@@ -16,31 +16,37 @@ from picaso import experimental_fluxes
 def _make_thermal_case():
     return dict(
         nlevel=4,
-        nwno=3,
+        nwno=5,
         numg=2,
         numt=2,
-        wavelength_um=np.array([20.0, 13.333333333333334, 10.0]),
-        wno=np.array([500.0, 750.0, 1000.0]),
+        wavelength_um=np.array([25.0, 20.0, 13.333333333333334, 10.0, 8.333333333333334]),
+        wno=np.array([400.0, 500.0, 750.0, 1000.0, 1200.0]),
         tlevel=np.array([900.0, 1000.0, 1100.0, 1200.0]),
         dtau=np.array(
             [
+                [0.09, 0.10, 0.11],
                 [0.11, 0.12, 0.13],
                 [0.21, 0.22, 0.23],
                 [0.31, 0.32, 0.33],
+                [0.41, 0.42, 0.43],
             ]
         ),
         w0=np.array(
             [
+                [0.09, 0.10, 0.11],
                 [0.11, 0.12, 0.13],
                 [0.21, 0.22, 0.23],
                 [0.31, 0.32, 0.33],
+                [0.41, 0.42, 0.43],
             ]
         ),
         cosb=np.array(
             [
+                [0.09, 0.10, 0.11],
                 [0.11, 0.12, 0.13],
                 [0.21, 0.22, 0.23],
                 [0.31, 0.32, 0.33],
+                [0.41, 0.42, 0.43],
             ]
         ),
         plevel=np.array([1.0e2, 2.0e2, 4.0e2, 8.0e2]),
@@ -50,7 +56,7 @@ def _make_thermal_case():
                 [0.51, 0.52],
             ]
         ),
-        surf_reflect=np.array([0.23, 0.24, 0.25]),
+        surf_reflect=np.array([0.23, 0.24, 0.25, 0.26, 0.27]),
         dwno=250.0,
     )
 
@@ -63,9 +69,9 @@ def _call_legacy(case, hard_surface):
         case["numg"],
         case["numt"],
         case["tlevel"].copy(),
-        case["dtau"].copy(),
-        case["w0"].copy(),
-        case["cosb"].copy(),
+        case["dtau"].T.copy(),
+        case["w0"].T.copy(),
+        case["cosb"].T.copy(),
         case["plevel"].copy(),
         case["ubar1"].copy(),
         case["surf_reflect"].copy(),
@@ -78,29 +84,37 @@ def _call_legacy(case, hard_surface):
 
 
 def _call_experimental(case, hard_surface):
-    dtau = case["dtau"].T.copy()
-    w0 = case["w0"].T.copy()
-    cosb = case["cosb"].T.copy()
+    ind_wv0 = 1
+    ind_wv1 = 4
+    dtau = case["dtau"][ind_wv0:ind_wv1].copy()
+    w0 = case["w0"][ind_wv0:ind_wv1].copy()
+    cosb = case["cosb"][ind_wv0:ind_wv1].copy()
     _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     solver = experimental_fluxes.ThermalSolver()
     result = experimental_fluxes.ThermalResult()
+    result._allocate(case["nwno"])
+    result.wavelength_um[:] = np.nan
+    result.thermal[:] = np.nan
 
     return experimental_fluxes.get_thermal_1d.py_func(
         solver,
         case["nlevel"],
+        ind_wv1 - ind_wv0,
+        ind_wv0,
+        ind_wv1,
         case["nwno"],
         case["numg"],
         case["numt"],
         gweight,
         tweight,
-        case["wavelength_um"].copy(),
+        case["wavelength_um"][ind_wv0:ind_wv1].copy(),
         dtau,
         w0,
         cosb,
         case["tlevel"].copy(),
         case["plevel"].copy(),
         case["ubar1"].copy(),
-        case["surf_reflect"].copy(),
+        case["surf_reflect"][ind_wv0:ind_wv1].copy(),
         hard_surface,
         result,
     )
@@ -112,5 +126,9 @@ def test_experimental_thermal_toa_parity(hard_surface):
     expected = _call_legacy(case, hard_surface)
     actual = _call_experimental(case, hard_surface)
 
+    ind_wv0 = 1
+    ind_wv1 = 4
     assert actual.thermal.shape == (case["nwno"],)
-    np.testing.assert_allclose(actual.thermal, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(actual.thermal[ind_wv0:ind_wv1], expected[ind_wv0:ind_wv1], rtol=1e-12, atol=1e-12)
+    assert np.all(np.isnan(actual.thermal[:ind_wv0]))
+    assert np.all(np.isnan(actual.thermal[ind_wv1:]))
