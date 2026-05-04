@@ -240,6 +240,10 @@ class RadtranOpacitiesWorkspace:
     continuum_temperature_load_idx: nb.int64[:]
     molecular_block: nb.float64[:,:]
     continuum_block: nb.float64[:,:]
+    molecular_raw_u16: nb.uint16[:]
+    molecular_raw_f32: nb.float32[:]
+    continuum_raw_u16: nb.uint16[:]
+    continuum_raw_f32: nb.float32[:]
 
     def __init__(self):
         self._allocate(0, 0, 0, 0, 0)
@@ -269,6 +273,10 @@ class RadtranOpacitiesWorkspace:
         self.continuum_temperature_load_idx = np.empty(ncontinuum_temperature, dtype=np.int64)
         self.molecular_block = np.empty((npressure * ntemperature, nwavelengths_per_chunk), dtype=np.float64)
         self.continuum_block = np.empty((ncontinuum_temperature, nwavelengths_per_chunk), dtype=np.float64)
+        self.molecular_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
+        self.molecular_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
+        self.continuum_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
+        self.continuum_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
 
     def _ensure(self, nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk):
         if (
@@ -427,22 +435,26 @@ class RadtranOpacities:
         dataset,
         source_sel,
         storage_code,
-        log10_floor,
         y_min,
         y_max,
         post_decode_factor,
+        raw_out,
         out_row,
     ):
         dataset.read_direct(
-            out_row,
+            raw_out,
             source_sel=source_sel,
+            dest_sel=np.s_[: raw_out.shape[0]],
         )
         if storage_code == 0:
             if y_max == y_min:
                 out_row[:] = y_min
             else:
+                out_row[:] = raw_out
                 out_row *= (y_max - y_min) / np.iinfo(np.uint16).max
                 out_row += y_min
+        else:
+            out_row[:] = raw_out
         np.power(10.0, out_row, out=out_row)
         out_row *= post_decode_factor
 
@@ -465,17 +477,22 @@ class RadtranOpacities:
 
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
+            dataset = self._molecular_group[species_name]
+            if self.molecular_storage_format[i_molecular] == 0:
+                raw_buffer = self.workspace.molecular_raw_u16
+            else:
+                raw_buffer = self.workspace.molecular_raw_f32
             for row_id in range(self.workspace.molecular_npairs):
                 ip = self.workspace.molecular_pair_pindex[row_id]
                 it = self.workspace.molecular_pair_tindex[row_id]
                 self._read_and_decode_opacity_row(
-                    self._molecular_group[species_name],
+                    dataset,
                     np.s_[ip, it, ind_wv0:ind_wv1],
                     self.molecular_storage_format[i_molecular],
-                    self.molecular_log10_floor[i_molecular],
                     self.molecular_y_min[i_molecular],
                     self.molecular_y_max[i_molecular],
                     1.0,
+                    raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
             _accumulate_molecular_tau(
@@ -504,6 +521,11 @@ class RadtranOpacities:
             i_left = atmosphere_name_to_index[species_left]
             i_right = atmosphere_name_to_index[species_right]
             block = self.workspace.continuum_block
+            dataset = self._continuum_group[continuum_name]
+            if self.continuum_storage_format[i_continuum] == 0:
+                raw_buffer = self.workspace.continuum_raw_u16
+            else:
+                raw_buffer = self.workspace.continuum_raw_f32
             _fill_cia_scale_workspace(
                 atmosphere,
                 i_left,
@@ -513,13 +535,13 @@ class RadtranOpacities:
             for row_id in range(self.workspace.continuum_nrows):
                 it = self.workspace.continuum_temperature_load_idx[row_id]
                 self._read_and_decode_opacity_row(
-                    self._continuum_group[continuum_name],
+                    dataset,
                     np.s_[it, ind_wv0:ind_wv1],
                     self.continuum_storage_format[i_continuum],
-                    self.continuum_log10_floor[i_continuum],
                     self.continuum_y_min[i_continuum],
                     self.continuum_y_max[i_continuum],
                     CIA_AMAGAT_TO_MOLECULE_CM,
+                    raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
 
