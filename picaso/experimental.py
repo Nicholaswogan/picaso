@@ -339,8 +339,12 @@ class RadtranOpacities:
     def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
-        tau_out = opacities_result.tau[:chunk_width, :]
-        tau_out[:] = 0.0
+        dtau_out = opacities_result.dtau[:chunk_width, :]
+        dtau_out[:] = 0.0
+
+        # Set nwavelengths and wavelengths
+        opacities_result.nwavelengths = chunk_width
+        opacities_result.wavelength_um[:chunk_width] = self.wavelength_um[ind_wv0:ind_wv1]
 
         # Loop over atmospheric species and accumulate molecular opacities.
         for i_species in range(atmosphere.nspecies):
@@ -372,7 +376,7 @@ class RadtranOpacities:
                 self.workspace.molecular_temperature_ind0,
                 self.workspace.molecular_temperature_ind1,
                 self.workspace.molecular_temperature_weight,
-                tau_out,
+                dtau_out,
             )
 
         # Loop over CIA continuum opacities.
@@ -415,8 +419,12 @@ class RadtranOpacities:
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
                 self.workspace.continuum_temperature_weight,
-                tau_out,
+                dtau_out,
             )
+
+        # For now w0 and cosb are zero.
+        opacities_result.w0[:chunk_width, :] = 0.0
+        opacities_result.cosb[:chunk_width, :] = 0.0
 
 
     def close(self) -> None:
@@ -558,9 +566,13 @@ class RadtranOpacitiesResult:
     # Dimensions
     nlayers : nb.int64
     nwavelengths_per_chunk : nb.int64
+    nwavelengths : nb.int64
+    wavelength_um : nb.float64[:]
 
-    # Tau, etc.
-    tau : nb.float64[:,:]
+    # Layer optical depth, chunk-major.
+    dtau : nb.float64[:,:]
+    w0 : nb.float64[:,:]
+    cosb : nb.float64[:,:]
 
     def __init__(self):
         self._allocate(0, 0)
@@ -568,7 +580,11 @@ class RadtranOpacitiesResult:
     def _allocate(self, nlayers, nwavelengths_per_chunk):
         self.nlayers = nlayers
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
-        self.tau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.nwavelengths = 0
+        self.wavelength_um = np.empty(nwavelengths_per_chunk, dtype=np.float64)
+        self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
     def _ensure(self, nlayers, nwavelengths_per_chunk):
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
