@@ -114,16 +114,16 @@ ThermalWorkspaceType = ThermalWorkspace.class_type.instance_type
 class ThermalResult:
 
     nwavelengths: nb.int64
-    wavelength: nb.float64[:] # Wavelengths in microns
-    flux: nb.float64[:] # TOA flux in CGS units
+    wavelength_um: nb.float64[:] # Wavelengths in microns
+    thermal: nb.float64[:] # Disk-integrated TOA flux in CGS units
 
     def __init__(self):
         self._allocate(0)
 
     def _allocate(self, nwavelengths):
         self.nwavelengths = nwavelengths
-        self.wavelength = np.empty(nwavelengths, dtype=np.float64)
-        self.flux = np.empty(nwavelengths, dtype=np.float64)
+        self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.thermal = np.empty(nwavelengths, dtype=np.float64)
 
     def _ensure(self, nwavelengths):
         if nwavelengths != self.nwavelengths:
@@ -135,45 +135,24 @@ class ThermalSolver:
 
     nlevel: nb.int64
     nwno: nb.int64
-    numg: nb.int64
-    numt: nb.int64
-    flux_at_top: nb.float64[:, :, :]
     workspace: types.ListType(ThermalWorkspaceType)
 
     def __init__(self):
-        self._allocate_results(0, 0, 0, 0)
-        self._allocate_workspace(0)
+        self._allocate(0, 0)
 
-    def _allocate_results(self, nlevel, nwno, numg, numt):
+    def _allocate(self, nlevel, nwno):
         self.nlevel = nlevel
         self.nwno = nwno
-        self.numg = numg
-        self.numt = numt
-        self.flux_at_top = np.empty((nwno, numg, numt), dtype=np.float64)
-
-    def _ensure_results(self, nlevel, nwno, numg, numt):
-        ok = self.nlevel == nlevel
-        ok = ok and self.nwno == nwno
-        ok = ok and self.numg == numg
-        ok = ok and self.numt == numt
-        if not ok:
-            self._allocate_results(nlevel, nwno, numg, numt)
-
-    def _allocate_workspace(self, nlevel):
         nthreads = nb.get_num_threads()
         self.workspace = typed.List.empty_list(ThermalWorkspaceType)
+        if nlevel <= 0:
+            return
         for _ in range(nthreads):
             self.workspace.append(ThermalWorkspace(nlevel))
 
-    def _ensure_workspace(self, nlevel):
-        if len(self.workspace) < 1:
-            raise Exception("The workspace list has a length of less than 1.")
-        if nlevel != self.workspace[0].nlevel or len(self.workspace) != nb.get_num_threads():
-            self._allocate_workspace(nlevel)
-
-    def _ensure(self, nlevel, nwno, numg, numt):
-        self._ensure_results(nlevel, nwno, numg, numt)
-        self._ensure_workspace(nlevel)
+    def _ensure(self, nlevel, nwno):
+        if nlevel != self.nlevel or nwno != self.nwno or len(self.workspace) != nb.get_num_threads():
+            self._allocate(nlevel, nwno)
 
 @nb.njit(parallel=True)
 def get_thermal_1d(
@@ -182,6 +161,8 @@ def get_thermal_1d(
     nwno,
     numg,
     numt,
+    gweight,
+    tweight,
     wavelength_um,
     dtau,
     w0,
@@ -202,14 +183,18 @@ def get_thermal_1d(
     ``(nwno, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
     """
 
-    self._ensure(nlevel, nwno, numg, numt)
+    self._ensure(nlevel, nwno)
+    result._ensure(nwno)
 
     for iw in nb.prange(nwno):
-        get_thermal_1d_w(
+        result.wavelength_um[iw] = wavelength_um[iw]
+        result.thermal[iw] = get_thermal_1d_w(
             self.workspace[nb.get_thread_id()],
             nlevel,
             numg,
             numt,
+            gweight,
+            tweight,
             wavelength_um[iw],
             dtau[iw, :],
             w0[iw, :],
@@ -219,10 +204,9 @@ def get_thermal_1d(
             ubar1,
             surf_reflect[iw],
             hard_surface,
-            self.flux_at_top[iw, :, :],
         )
 
-    return self.flux_at_top
+    return result
 
 
 @nb.njit
@@ -231,6 +215,8 @@ def get_thermal_1d_w(
     nlevel,
     numg,
     numt,
+    gweight,
+    tweight,
     wavelength_um,
     dtau,
     w0,
@@ -240,7 +226,6 @@ def get_thermal_1d_w(
     ubar1,
     surf_reflect,
     hard_surface,
-    flux_at_top,
 ):
     """Per-wavelength thermal solve used by :func:`get_thermal_1d`."""
     nlayer = nlevel - 1
@@ -326,6 +311,7 @@ def get_thermal_1d_w(
         positive[i] = D[2 * i] + D[2 * i + 1]
         negative[i] = D[2 * i] - D[2 * i + 1]
 
+    thermal_sum = 0.0
     for nt in range(numt):
         for ng in range(numg):
             u1 = ubar1[ng, nt]
@@ -359,10 +345,18 @@ def get_thermal_1d_w(
             alpha1 = twopi * (bb[0] + b1[0] * (1.0 / (g1[0] + g2[0]) - mu1))
             alpha2 = twopi * b1[0]
 
-            flux_at_top[ng, nt] = (
+            flux_at_top = (
                 flux_plus[1] * exptrm_angle_mdpt
                 + (gcoef / (lamda[0] * u1 - 1.0)) * (exptrm_positive[0] * exptrm_angle_mdpt - exptrm_positive_mdpt)
                 - (hcoef / (lamda[0] * u1 + 1.0)) * (exptrm_minus[0] * exptrm_angle_mdpt - exptrm_minus_mdpt)
                 + alpha1 * (1.0 - exptrm_angle_mdpt)
                 + alpha2 * (u1 + 0.5 * dtau[0] - (dtau[0] + u1) * exptrm_angle_mdpt)
             )
+            thermal_sum += flux_at_top * gweight[ng] * tweight[nt]
+
+    if numt == 1:
+        sym_fac = 1.0
+    else:
+        sym_fac = 1.0 / (2.0 * np.pi)
+
+    return thermal_sum * sym_fac

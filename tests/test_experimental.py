@@ -8,6 +8,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from picaso import disco
 from picaso import fluxes
 from picaso import experimental_fluxes
 
@@ -72,16 +73,16 @@ def _call_legacy(case, hard_surface):
         case["dwno"],
         0,
     )
-    return flux_at_top
+    _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
+    return disco.compress_thermal(case["nwno"], flux_at_top, gweight, tweight)
 
 
 def _call_experimental(case, hard_surface):
     dtau = case["dtau"].T.copy()
     w0 = case["w0"].T.copy()
     cosb = case["cosb"].T.copy()
-    solver = experimental_fluxes.ThermalSolver.__new__(experimental_fluxes.ThermalSolver)
-    solver._allocate_results(case["nlevel"], case["nwno"], case["numg"], case["numt"])
-    solver._allocate_workspace(case["nlevel"])
+    _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
+    solver = experimental_fluxes.ThermalSolver()
     result = experimental_fluxes.ThermalResult()
 
     return experimental_fluxes.get_thermal_1d.py_func(
@@ -90,6 +91,8 @@ def _call_experimental(case, hard_surface):
         case["nwno"],
         case["numg"],
         case["numt"],
+        gweight,
+        tweight,
         case["wavelength_um"].copy(),
         dtau,
         w0,
@@ -109,5 +112,5 @@ def test_experimental_thermal_toa_parity(hard_surface):
     expected = _call_legacy(case, hard_surface)
     actual = _call_experimental(case, hard_surface)
 
-    assert actual.shape == (case["nwno"], case["numg"], case["numt"])
-    np.testing.assert_allclose(actual, expected.transpose(2, 0, 1), rtol=1e-12, atol=1e-12)
+    assert actual.thermal.shape == (case["nwno"],)
+    np.testing.assert_allclose(actual.thermal, expected, rtol=1e-12, atol=1e-12)
