@@ -153,7 +153,7 @@ class Planet:
         
 @dataclass
 class RadtranSettings:
-    hard_surface: int = 0
+    hard_surface: bool = False
     numg: int = 1
     numt: int = 1
     phase_angle: float = 0.0
@@ -177,8 +177,8 @@ class RadtranSettings:
             raise ValueError(f"numg must be positive, got {self.numg}")
         if self.numt <= 0:
             raise ValueError(f"numt must be positive, got {self.numt}")
-        if self.hard_surface not in (0, 1):
-            raise ValueError(f"hard_surface must be 0 or 1, got {self.hard_surface}")
+        if not isinstance(self.hard_surface, bool):
+            raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
 
     def _refresh_geometry(self):
         self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(self.numg, self.numt)
@@ -390,7 +390,7 @@ class RadtranOpacities:
 
         # Set nwavelengths and wavelengths
         opacities_result.nwavelengths = chunk_width
-        opacities_result.wavelength_um[:chunk_width] = self.wavelength_um[ind_wv0:ind_wv1]
+        opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
         opacities_result.surf_reflect[:chunk_width] = 0.0
 
         # Loop over atmospheric species and accumulate molecular opacities.
@@ -774,7 +774,7 @@ class RadtranAtmosphere:
 class Radtran:
     "Radiative-transfer driver."
 
-    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096, numg=1, numt=1, phase_angle=0.0):
+    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096, settings_kwargs=None):
 
         # Opacities
         self.opacities = RadtranOpacities(opacity_filename)
@@ -795,7 +795,9 @@ class Radtran:
         self.thermal_result = ThermalResult()
 
         # Runtime settings and default thermal geometry.
-        self.settings = RadtranSettings(numg=numg, numt=numt, phase_angle=phase_angle)
+        if settings_kwargs is None:
+            settings_kwargs = {}
+        self.settings = RadtranSettings(**settings_kwargs)
 
     def _setup_atmosphere(self, atm: Atmosphere, planet: Planet):
         "Setup atmospheric grid."
