@@ -13,7 +13,7 @@ import numpy as np
 import numba as nb
 from numba import typed
 
-from .disco import compute_disco, get_angles_3d
+from .disco import compute_disco, get_angles_1d, get_angles_3d
 from .experimental_fluxes import ThermalResult, ThermalSolver, get_thermal_1d
 
 # cgs constants for the compiled hydrostatic setup
@@ -189,7 +189,10 @@ class RadtranSettings:
             raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
 
     def _refresh_geometry(self):
-        self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(self.numg, self.numt)
+        if self.numt == 1:
+            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_1d(self.numg)
+        else:
+            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(self.numg, self.numt)
         self.ubar0, self.ubar1, self.cos_theta, self.latitude, self.longitude = compute_disco(
             self.numg, self.numt, self.gangle, self.tangle, self.phase_angle
         )
