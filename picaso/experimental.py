@@ -293,6 +293,27 @@ class RadtranOpacities:
 
         self.workspace = RadtranOpacitiesWorkspace()
 
+    def prepare_interpolation(self, atmosphere: RadtranAtmosphere, nwavelengths_per_chunk: int):
+        self.workspace._ensure(
+            atmosphere.nlayers,
+            self.npressure,
+            self.ntemperature,
+            self.ncontinuum_temperature,
+            nwavelengths_per_chunk,
+        )
+
+        _fill_molecular_interpolation_workspace(
+            atmosphere,
+            self.pressure,
+            self.temperature,
+            self.workspace,
+        )
+        _fill_continuum_interpolation_workspace(
+            atmosphere,
+            self.continuum_temperatures,
+            self.workspace,
+        )
+
     def _read_and_decode_opacity_block(
         self,
         dataset,
@@ -315,31 +336,11 @@ class RadtranOpacities:
         np.power(10.0, out, out=out)
         out *= post_decode_factor
 
-    def compute_opacities(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
-        
-        # Ensure workspace and result space is allocated
-        self.workspace._ensure(
-            atmosphere.nlayers,
-            self.npressure,
-            self.ntemperature,
-            self.ncontinuum_temperature,
-            ind_wv1 - ind_wv0,
-        )
-        opacities_result._ensure(atmosphere.nlayers, ind_wv1 - ind_wv0)
-        opacities_result.tau[:] = 0.0
-
-        # Get interpolation indicies
-        _fill_molecular_interpolation_workspace(
-            atmosphere,
-            self.pressure,
-            self.temperature,
-            self.workspace,
-        )
-        _fill_continuum_interpolation_workspace(
-            atmosphere,
-            self.continuum_temperatures,
-            self.workspace,
-        )
+    def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+        chunk_width = ind_wv1 - ind_wv0
+        opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
+        tau_out = opacities_result.tau[:chunk_width, :]
+        tau_out[:] = 0.0
 
         # Loop over atmospheric species and accumulate molecular opacities.
         for i_species in range(atmosphere.nspecies):
@@ -348,7 +349,7 @@ class RadtranOpacities:
                 continue
 
             i_molecular = self.molecular_name_to_index[species_name]
-            block = self.workspace.molecular_block
+            block = self.workspace.molecular_block[:, :, :chunk_width]
 
             self._read_and_decode_opacity_block(
                 self._molecular_group[species_name],
@@ -371,7 +372,7 @@ class RadtranOpacities:
                 self.workspace.molecular_temperature_ind0,
                 self.workspace.molecular_temperature_ind1,
                 self.workspace.molecular_temperature_weight,
-                opacities_result.tau,
+                tau_out,
             )
 
         # Loop over CIA continuum opacities.
@@ -387,7 +388,7 @@ class RadtranOpacities:
 
             i_left = atmosphere_name_to_index[species_left]
             i_right = atmosphere_name_to_index[species_right]
-            block = self.workspace.continuum_block
+            block = self.workspace.continuum_block[:, :chunk_width]
 
             self._read_and_decode_opacity_block(
                 self._continuum_group[continuum_name],
@@ -414,7 +415,7 @@ class RadtranOpacities:
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
                 self.workspace.continuum_temperature_weight,
-                opacities_result.tau,
+                tau_out,
             )
 
 
@@ -727,13 +728,19 @@ class Radtran:
         "Setup atmospheric grid."
         self.atmosphere.setup(atm._atm, planet)
 
+    def _prepare_interpolation(self):
+        "Prepared interpolation for computing opacities"
+        self.opacities.prepare_interpolation(self.atmosphere, self.nwavelengths_per_chunk)
+
     def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
         self.opacities.compute_opacity(self.atmosphere, ind_wv0, ind_wv1, self.opacities_result)
 
-    def _radiate(self, calculation):
+    def _radiate(self, ind_wv0, ind_wv1, calculation):
         "Do the radiative transfer."
-        pass
+
+        if calculation != 'thermal':
+            raise ValueError
 
     def spectrum(self, atm: Atmosphere, planet: Planet, clouds: Clouds=None, star: Star=None, calculation='thermal'):
 
@@ -743,6 +750,9 @@ class Radtran:
         # Setup the atmospheric grid.
         self._setup_atmosphere(atm, planet)
 
+        # Prepare interpolation
+        self._prepare_interpolation()
+
         for i in range(self.nwavelength_chunks):
             ind_wv0 = i * self.nwavelengths_per_chunk
             ind_wv1 = min(ind_wv0 + self.nwavelengths_per_chunk, self.opacities.nwavelength)
@@ -751,7 +761,7 @@ class Radtran:
             self._compute_opacity(ind_wv0, ind_wv1)
 
             # Do the RT for the wavelength chunk
-            self._radiate(calculation)
+            self._radiate(ind_wv0, ind_wv1, calculation)
     
 
 def _decode_sqlite_array(cell):
