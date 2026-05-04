@@ -221,6 +221,8 @@ class RadtranOpacitiesWorkspace:
     ntemperature: nb.int64
     ncontinuum_temperature: nb.int64
     nwavelengths_per_chunk: nb.int64
+    molecular_npairs: nb.int64
+    continuum_nrows: nb.int64
     molecular_pressure_ind0: nb.int64[:]
     molecular_pressure_ind1: nb.int64[:]
     molecular_pressure_weight: nb.float64[:]
@@ -231,7 +233,12 @@ class RadtranOpacitiesWorkspace:
     continuum_temperature_ind1: nb.int64[:]
     continuum_temperature_weight: nb.float64[:]
     cia_scale: nb.float64[:]
-    molecular_block: nb.float64[:,:,:]
+    molecular_pair_map: nb.int64[:,:]
+    molecular_pair_pindex: nb.int64[:]
+    molecular_pair_tindex: nb.int64[:]
+    continuum_temperature_map: nb.int64[:]
+    continuum_temperature_load_idx: nb.int64[:]
+    molecular_block: nb.float64[:,:]
     continuum_block: nb.float64[:,:]
 
     def __init__(self):
@@ -243,6 +250,8 @@ class RadtranOpacitiesWorkspace:
         self.ntemperature = ntemperature
         self.ncontinuum_temperature = ncontinuum_temperature
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
+        self.molecular_npairs = 0
+        self.continuum_nrows = 0
         self.molecular_pressure_ind0 = np.empty(nlayers, dtype=np.int64)
         self.molecular_pressure_ind1 = np.empty(nlayers, dtype=np.int64)
         self.molecular_pressure_weight = np.empty(nlayers, dtype=np.float64)
@@ -253,7 +262,12 @@ class RadtranOpacitiesWorkspace:
         self.continuum_temperature_ind1 = np.empty(nlayers, dtype=np.int64)
         self.continuum_temperature_weight = np.empty(nlayers, dtype=np.float64)
         self.cia_scale = np.empty(nlayers, dtype=np.float64)
-        self.molecular_block = np.empty((npressure, ntemperature, nwavelengths_per_chunk), dtype=np.float64)
+        self.molecular_pair_map = np.full((npressure, ntemperature), -1, dtype=np.int64)
+        self.molecular_pair_pindex = np.empty(npressure * ntemperature, dtype=np.int64)
+        self.molecular_pair_tindex = np.empty(npressure * ntemperature, dtype=np.int64)
+        self.continuum_temperature_map = np.full(ncontinuum_temperature, -1, dtype=np.int64)
+        self.continuum_temperature_load_idx = np.empty(ncontinuum_temperature, dtype=np.int64)
+        self.molecular_block = np.empty((npressure * ntemperature, nwavelengths_per_chunk), dtype=np.float64)
         self.continuum_block = np.empty((ncontinuum_temperature, nwavelengths_per_chunk), dtype=np.float64)
 
     def _ensure(self, nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk):
@@ -408,6 +422,30 @@ class RadtranOpacities:
         np.power(10.0, chunk, out=chunk)
         chunk *= post_decode_factor
 
+    def _read_and_decode_opacity_row(
+        self,
+        dataset,
+        source_sel,
+        storage_code,
+        log10_floor,
+        y_min,
+        y_max,
+        post_decode_factor,
+        out_row,
+    ):
+        dataset.read_direct(
+            out_row,
+            source_sel=source_sel,
+        )
+        if storage_code == 0:
+            if y_max == y_min:
+                out_row[:] = y_min
+            else:
+                out_row *= (y_max - y_min) / np.iinfo(np.uint16).max
+                out_row += y_min
+        np.power(10.0, out_row, out=out_row)
+        out_row *= post_decode_factor
+
     def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
@@ -427,21 +465,21 @@ class RadtranOpacities:
 
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
-
-            self._read_and_decode_opacity_block(
-                self._molecular_group[species_name],
-                ind_wv0,
-                ind_wv1,
-                self.molecular_storage_format[i_molecular],
-                self.molecular_log10_floor[i_molecular],
-                self.molecular_y_min[i_molecular],
-                self.molecular_y_max[i_molecular],
-                1.0,
-                block,
-            )
-
+            for row_id in range(self.workspace.molecular_npairs):
+                ip = self.workspace.molecular_pair_pindex[row_id]
+                it = self.workspace.molecular_pair_tindex[row_id]
+                self._read_and_decode_opacity_row(
+                    self._molecular_group[species_name],
+                    np.s_[ip, it, ind_wv0:ind_wv1],
+                    self.molecular_storage_format[i_molecular],
+                    self.molecular_log10_floor[i_molecular],
+                    self.molecular_y_min[i_molecular],
+                    self.molecular_y_max[i_molecular],
+                    1.0,
+                    block[row_id, :chunk_width],
+                )
             _accumulate_molecular_tau(
-                block[:, :, :chunk_width],
+                block[:self.workspace.molecular_npairs, :chunk_width],
                 atmosphere.columns[i_species],
                 self.workspace.molecular_pressure_ind0,
                 self.workspace.molecular_pressure_ind1,
@@ -466,28 +504,27 @@ class RadtranOpacities:
             i_left = atmosphere_name_to_index[species_left]
             i_right = atmosphere_name_to_index[species_right]
             block = self.workspace.continuum_block
-
-            self._read_and_decode_opacity_block(
-                self._continuum_group[continuum_name],
-                ind_wv0,
-                ind_wv1,
-                self.continuum_storage_format[i_continuum],
-                self.continuum_log10_floor[i_continuum],
-                self.continuum_y_min[i_continuum],
-                self.continuum_y_max[i_continuum],
-                CIA_AMAGAT_TO_MOLECULE_CM,
-                block,
-            )
-
             _fill_cia_scale_workspace(
                 atmosphere,
                 i_left,
                 i_right,
                 self.workspace,
             )
+            for row_id in range(self.workspace.continuum_nrows):
+                it = self.workspace.continuum_temperature_load_idx[row_id]
+                self._read_and_decode_opacity_row(
+                    self._continuum_group[continuum_name],
+                    np.s_[it, ind_wv0:ind_wv1],
+                    self.continuum_storage_format[i_continuum],
+                    self.continuum_log10_floor[i_continuum],
+                    self.continuum_y_min[i_continuum],
+                    self.continuum_y_max[i_continuum],
+                    CIA_AMAGAT_TO_MOLECULE_CM,
+                    block[row_id, :chunk_width],
+                )
 
             _accumulate_cia_tau(
-                block[:, :chunk_width],
+                block[:self.workspace.continuum_nrows, :chunk_width],
                 self.workspace.cia_scale,
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
@@ -544,27 +581,57 @@ def _bracket_1d(grid, value):
 
 
 @nb.njit
+def _get_or_create_molecular_pair(ip, it, workspace):
+    row_id = workspace.molecular_pair_map[ip, it]
+    if row_id == -1:
+        row_id = workspace.molecular_npairs
+        workspace.molecular_pair_map[ip, it] = row_id
+        workspace.molecular_pair_pindex[row_id] = ip
+        workspace.molecular_pair_tindex[row_id] = it
+        workspace.molecular_npairs += 1
+    return row_id
+
+
+@nb.njit
+def _get_or_create_continuum_temp(it, workspace):
+    row_id = workspace.continuum_temperature_map[it]
+    if row_id == -1:
+        row_id = workspace.continuum_nrows
+        workspace.continuum_temperature_map[it] = row_id
+        workspace.continuum_temperature_load_idx[row_id] = it
+        workspace.continuum_nrows += 1
+    return row_id
+
+
+@nb.njit
 def _fill_molecular_interpolation_workspace(atmosphere, pressure_grid, temperature_grid, workspace):
     nlayers = atmosphere.nlayers
+    workspace.molecular_npairs = 0
+    for ip in range(workspace.npressure):
+        for it in range(workspace.ntemperature):
+            workspace.molecular_pair_map[ip, it] = -1
     for i in range(nlayers):
         ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.pressures[i])
         it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
 
-        workspace.molecular_pressure_ind0[i] = ip0
-        workspace.molecular_pressure_ind1[i] = ip1
+        workspace.molecular_pressure_ind0[i] = _get_or_create_molecular_pair(ip0, it0, workspace)
+        workspace.molecular_pressure_ind1[i] = _get_or_create_molecular_pair(ip1, it0, workspace)
+        workspace.molecular_temperature_ind0[i] = _get_or_create_molecular_pair(ip0, it1, workspace)
+        workspace.molecular_temperature_ind1[i] = _get_or_create_molecular_pair(ip1, it1, workspace)
         workspace.molecular_pressure_weight[i] = pw
-        workspace.molecular_temperature_ind0[i] = it0
-        workspace.molecular_temperature_ind1[i] = it1
         workspace.molecular_temperature_weight[i] = tw
 
 
 @nb.njit
 def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, workspace):
     nlayers = atmosphere.nlayers
+    workspace.continuum_nrows = 0
+    for it in range(workspace.ncontinuum_temperature):
+        workspace.continuum_temperature_map[it] = -1
     for i in range(nlayers):
         it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
-        workspace.continuum_temperature_ind0[i] = it0
-        workspace.continuum_temperature_ind1[i] = it1
+        workspace.continuum_temperature_ind0[i] = _get_or_create_continuum_temp(it0, workspace)
+        workspace.continuum_temperature_ind1[i] = _get_or_create_continuum_temp(it1, workspace)
         workspace.continuum_temperature_weight[i] = tw
 
 
@@ -581,17 +648,17 @@ def _fill_cia_scale_workspace(atmosphere, i_left_species, i_right_species, works
 
 @nb.njit
 def _interp_molecular_opacity(block, i_layer, i_wavelength, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight):
-    ip0 = p_ind0[i_layer]
-    ip1 = p_ind1[i_layer]
+    i00 = p_ind0[i_layer]
+    i10 = p_ind1[i_layer]
+    i01 = t_ind0[i_layer]
+    i11 = t_ind1[i_layer]
     pw = p_weight[i_layer]
-    it0 = t_ind0[i_layer]
-    it1 = t_ind1[i_layer]
     tw = t_weight[i_layer]
 
-    v00 = block[ip0, it0, i_wavelength]
-    v10 = block[ip1, it0, i_wavelength]
-    v01 = block[ip0, it1, i_wavelength]
-    v11 = block[ip1, it1, i_wavelength]
+    v00 = block[i00, i_wavelength]
+    v10 = block[i10, i_wavelength]
+    v01 = block[i01, i_wavelength]
+    v11 = block[i11, i_wavelength]
 
     v0 = (1.0 - pw) * v00 + pw * v10
     v1 = (1.0 - pw) * v01 + pw * v11
@@ -600,7 +667,7 @@ def _interp_molecular_opacity(block, i_layer, i_wavelength, p_ind0, p_ind1, p_we
 
 @nb.njit
 def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
-    nwavelengths = block.shape[2]
+    nwavelengths = block.shape[1]
     nlayers = columns_row.shape[0]
 
     for i in range(nlayers):
