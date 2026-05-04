@@ -11,7 +11,8 @@ import numpy as np
 import numba as nb
 from numba import typed
 
-from .experimental_fluxes import ThermalResult, ThermalSolver
+from .disco import compute_disco, get_angles_3d
+from .experimental_fluxes import ThermalResult, ThermalSolver, get_thermal_1d
 
 # cgs constants for the compiled hydrostatic setup
 KB_CGS = 1.380649e-16
@@ -150,6 +151,49 @@ class Planet:
         self.mass = mass
         self.semimajor = semimajor
         
+@dataclass
+class RadtranSettings:
+    hard_surface: int = 0
+    numg: int = 1
+    numt: int = 1
+    phase_angle: float = 0.0
+
+    gangle: np.ndarray = None
+    gweight: np.ndarray = None
+    tangle: np.ndarray = None
+    tweight: np.ndarray = None
+    ubar0: np.ndarray = None
+    ubar1: np.ndarray = None
+    cos_theta: float = np.nan
+    latitude: np.ndarray = None
+    longitude: np.ndarray = None
+
+    def __post_init__(self):
+        self._validate()
+        self._refresh_geometry()
+
+    def _validate(self):
+        if self.numg <= 0:
+            raise ValueError(f"numg must be positive, got {self.numg}")
+        if self.numt <= 0:
+            raise ValueError(f"numt must be positive, got {self.numt}")
+        if self.hard_surface not in (0, 1):
+            raise ValueError(f"hard_surface must be 0 or 1, got {self.hard_surface}")
+
+    def _refresh_geometry(self):
+        self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(self.numg, self.numt)
+        self.ubar0, self.ubar1, self.cos_theta, self.latitude, self.longitude = compute_disco(
+            self.numg, self.numt, self.gangle, self.tangle, self.phase_angle
+        )
+
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            if not hasattr(self, key):
+                raise AttributeError(f"RadtranSettings has no attribute {key!r}")
+            setattr(self, key, value)
+        self._validate()
+        self._refresh_geometry()
+        return self
         
 class Clouds:
     pass
@@ -347,6 +391,7 @@ class RadtranOpacities:
         # Set nwavelengths and wavelengths
         opacities_result.nwavelengths = chunk_width
         opacities_result.wavelength_um[:chunk_width] = self.wavelength_um[ind_wv0:ind_wv1]
+        opacities_result.surf_reflect[:chunk_width] = 0.0
 
         # Loop over atmospheric species and accumulate molecular opacities.
         for i_species in range(atmosphere.nspecies):
@@ -575,6 +620,7 @@ class RadtranOpacitiesResult:
     dtau : nb.float64[:,:]
     w0 : nb.float64[:,:]
     cosb : nb.float64[:,:]
+    surf_reflect : nb.float64[:]
 
     def __init__(self):
         self._allocate(0, 0)
@@ -587,6 +633,7 @@ class RadtranOpacitiesResult:
         self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
     def _ensure(self, nlayers, nwavelengths_per_chunk):
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
@@ -723,10 +770,11 @@ class RadtranAtmosphere:
         if nlayers != self.nlayers or nspecies != self.nspecies:
             self._allocate(nlayers, nspecies)
 
+
 class Radtran:
     "Radiative-transfer driver."
 
-    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096):
+    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=4096, numg=1, numt=1, phase_angle=0.0):
 
         # Opacities
         self.opacities = RadtranOpacities(opacity_filename)
@@ -743,8 +791,11 @@ class Radtran:
         self.atmosphere = RadtranAtmosphere()
 
         # Solvers
-        self.ThermalSolver = ThermalSolver()
-        self.ThermalResult = ThermalResult()
+        self.thermal = ThermalSolver()
+        self.thermal_result = ThermalResult()
+
+        # Runtime settings and default thermal geometry.
+        self.settings = RadtranSettings(numg=numg, numt=numt, phase_angle=phase_angle)
 
     def _setup_atmosphere(self, atm: Atmosphere, planet: Planet):
         "Setup atmospheric grid."
@@ -763,6 +814,31 @@ class Radtran:
 
         if calculation != 'thermal':
             raise ValueError
+
+        chunk_width = ind_wv1 - ind_wv0
+
+        get_thermal_1d(
+            self.thermal,
+            self.atmosphere.nlayers,
+            chunk_width,
+            ind_wv0,
+            ind_wv1,
+            self.opacities.nwavelength,
+            self.settings.ubar1.shape[0],
+            self.settings.ubar1.shape[1],
+            self.settings.gweight,
+            self.settings.tweight,
+            self.opacities_result.wavelength_um[:chunk_width],
+            self.opacities_result.dtau[:chunk_width, :],
+            self.opacities_result.w0[:chunk_width, :],
+            self.opacities_result.cosb[:chunk_width, :],
+            self.atmosphere.temperatures,
+            self.atmosphere.pressures,
+            self.settings.ubar1,
+            self.opacities_result.surf_reflect[:chunk_width],
+            self.settings.hard_surface,
+            self.thermal_result,
+        )
 
     def spectrum(self, atm: Atmosphere, planet: Planet, clouds: Clouds=None, star: Star=None, calculation='thermal'):
 
@@ -783,8 +859,9 @@ class Radtran:
             self._compute_opacity(ind_wv0, ind_wv1)
 
             # Do the RT for the wavelength chunk
-            self._radiate(ind_wv0, ind_wv1, calculation)
-    
+            self._radiate(ind_wv0, ind_wv1, calculation)    
+
+        return self.thermal_result
 
 def _decode_sqlite_array(cell):
     if isinstance(cell, np.ndarray):
