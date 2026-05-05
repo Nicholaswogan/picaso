@@ -393,43 +393,6 @@ class RadtranOpacities:
             self.workspace,
         )
 
-    def _read_and_decode_opacity_block(
-        self,
-        dataset,
-        ind_wv0,
-        ind_wv1,
-        storage_code,
-        log10_floor,
-        y_min,
-        y_max,
-        post_decode_factor,
-        out,
-    ):
-        if out.ndim == 3:
-            dataset.read_direct(
-                out,
-                source_sel=np.s_[:, :, ind_wv0:ind_wv1],
-                dest_sel=np.s_[:, :, : ind_wv1 - ind_wv0],
-            )
-            chunk = out[:, :, : ind_wv1 - ind_wv0]
-        elif out.ndim == 2:
-            dataset.read_direct(
-                out,
-                source_sel=np.s_[:, ind_wv0:ind_wv1],
-                dest_sel=np.s_[:, : ind_wv1 - ind_wv0],
-            )
-            chunk = out[:, : ind_wv1 - ind_wv0]
-        else:
-            raise ValueError(f"unsupported opacity block ndim {out.ndim}")
-        if storage_code == 0:
-            if y_max == y_min:
-                chunk[:] = y_min
-            else:
-                chunk *= (y_max - y_min) / np.iinfo(np.uint16).max
-                chunk += y_min
-        np.power(10.0, chunk, out=chunk)
-        chunk *= post_decode_factor
-
     def _read_and_decode_opacity_row(
         self,
         dataset,
@@ -669,47 +632,33 @@ def _fill_cia_scale_workspace(atmosphere, i_left_species, i_right_species, works
 
 
 @nb.njit
-def _interp_molecular_opacity(block, i_layer, i_wavelength, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight):
-    i00 = p_ind0[i_layer]
-    i10 = p_ind1[i_layer]
-    i01 = t_ind0[i_layer]
-    i11 = t_ind1[i_layer]
-    pw = p_weight[i_layer]
-    tw = t_weight[i_layer]
-
-    v00 = block[i00, i_wavelength]
-    v10 = block[i10, i_wavelength]
-    v01 = block[i01, i_wavelength]
-    v11 = block[i11, i_wavelength]
-
-    v0 = (1.0 - pw) * v00 + pw * v10
-    v1 = (1.0 - pw) * v01 + pw * v11
-    return (1.0 - tw) * v0 + tw * v1
-
-
-@nb.njit
 def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
     nwavelengths = block.shape[1]
     nlayers = columns_row.shape[0]
 
     for i in range(nlayers):
         column = columns_row[i]
+        i00 = p_ind0[i]
+        i10 = p_ind1[i]
+        i01 = t_ind0[i]
+        i11 = t_ind1[i]
+        pw = p_weight[i]
+        tw = t_weight[i]
+        c00 = (1.0 - pw) * (1.0 - tw)
+        c10 = pw * (1.0 - tw)
+        c01 = (1.0 - pw) * tw
+        c11 = pw * tw
 
         for iw in range(nwavelengths):
-            tau_out[iw, i] += _interp_molecular_opacity(
-                block, i, iw, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight
-            ) * column
-
-
-@nb.njit
-def _interp_continuum_opacity(block, i_layer, i_wavelength, t_ind0, t_ind1, t_weight):
-    it0 = t_ind0[i_layer]
-    it1 = t_ind1[i_layer]
-    tw = t_weight[i_layer]
-
-    v0 = block[it0, i_wavelength]
-    v1 = block[it1, i_wavelength]
-    return (1.0 - tw) * v0 + tw * v1
+            tau_out[iw, i] += (
+                (
+                    c00 * block[i00, iw]
+                    + c10 * block[i10, iw]
+                    + c01 * block[i01, iw]
+                    + c11 * block[i11, iw]
+                )
+                * column
+            )
 
 
 @nb.njit
@@ -719,8 +668,13 @@ def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, ta
 
     for i in range(nlayers):
         scale = continuum_scale_row[i]
+        it0 = t_ind0[i]
+        it1 = t_ind1[i]
+        tw = t_weight[i]
+        c0 = 1.0 - tw
+        c1 = tw
         for iw in range(nwavelengths):
-            tau_out[iw, i] += _interp_continuum_opacity(block, i, iw, t_ind0, t_ind1, t_weight) * scale
+            tau_out[iw, i] += (c0 * block[it0, iw] + c1 * block[it1, iw]) * scale
 
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
