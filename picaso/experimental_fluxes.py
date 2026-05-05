@@ -255,6 +255,10 @@ def get_thermal_1d_w(
     positive = wrk.positive
     negative = wrk.negative
     flux_plus = wrk.flux_plus
+    gcoef = wrk.c_plus_up
+    hcoef = wrk.c_minus_up
+    alpha1 = wrk.c_plus_down
+    alpha2 = wrk.c_minus_down
 
     _fill_blackbody_column(tlevel, wno, bb)
 
@@ -317,6 +321,12 @@ def get_thermal_1d_w(
         positive[i] = D[2 * i] + D[2 * i + 1]
         negative[i] = D[2 * i] - D[2 * i + 1]
 
+    for i in range(nlayer):
+        gcoef[i] = (1.0 / mu1 - lamda[i]) * positive[i]
+        hcoef[i] = gama[i] * (lamda[i] + 1.0 / mu1) * negative[i]
+        alpha1[i] = twopi * (bb[i] + b1[i] * (1.0 / (g1[i] + g2[i]) - mu1))
+        alpha2[i] = twopi * b1[i]
+
     thermal_sum = 0.0
     for nt in range(numt):
         for ng in range(numg):
@@ -330,33 +340,24 @@ def get_thermal_1d_w(
             for ibot in range(nlayer - 1, -1, -1):
                 exptrm_angle = np.exp(-dtau[ibot] / u1)
 
-                gcoef = (1.0 / mu1 - lamda[ibot]) * positive[ibot]
-                hcoef = gama[ibot] * (lamda[ibot] + 1.0 / mu1) * negative[ibot]
-                alpha1 = twopi * (bb[ibot] + b1[ibot] * (1.0 / (g1[ibot] + g2[ibot]) - mu1))
-                alpha2 = twopi * b1[ibot]
-
                 flux_plus[ibot] = (
                     flux_plus[ibot + 1] * exptrm_angle
-                    + (gcoef / (lamda[ibot] * u1 - 1.0)) * (exptrm_positive[ibot] * exptrm_angle - 1.0)
-                    + (hcoef / (lamda[ibot] * u1 + 1.0)) * (1.0 - exptrm_minus[ibot] * exptrm_angle)
-                    + alpha1 * (1.0 - exptrm_angle)
-                    + alpha2 * (u1 - (dtau[ibot] + u1) * exptrm_angle)
+                    + (gcoef[ibot] / (lamda[ibot] * u1 - 1.0)) * (exptrm_positive[ibot] * exptrm_angle - 1.0)
+                    + (hcoef[ibot] / (lamda[ibot] * u1 + 1.0)) * (1.0 - exptrm_minus[ibot] * exptrm_angle)
+                    + alpha1[ibot] * (1.0 - exptrm_angle)
+                    + alpha2[ibot] * (u1 - (dtau[ibot] + u1) * exptrm_angle)
                 )
 
             exptrm_angle_mdpt = np.exp(-0.5 * dtau[0] / u1)
             exptrm_positive_mdpt = np.exp(0.5 * exptrm[0])
             exptrm_minus_mdpt = 1.0 / exptrm_positive_mdpt
-            gcoef = (1.0 / mu1 - lamda[0]) * positive[0]
-            hcoef = gama[0] * (lamda[0] + 1.0 / mu1) * negative[0]
-            alpha1 = twopi * (bb[0] + b1[0] * (1.0 / (g1[0] + g2[0]) - mu1))
-            alpha2 = twopi * b1[0]
 
             flux_at_top = (
                 flux_plus[1] * exptrm_angle_mdpt
-                + (gcoef / (lamda[0] * u1 - 1.0)) * (exptrm_positive[0] * exptrm_angle_mdpt - exptrm_positive_mdpt)
-                - (hcoef / (lamda[0] * u1 + 1.0)) * (exptrm_minus[0] * exptrm_angle_mdpt - exptrm_minus_mdpt)
-                + alpha1 * (1.0 - exptrm_angle_mdpt)
-                + alpha2 * (u1 + 0.5 * dtau[0] - (dtau[0] + u1) * exptrm_angle_mdpt)
+                + (gcoef[0] / (lamda[0] * u1 - 1.0)) * (exptrm_positive[0] * exptrm_angle_mdpt - exptrm_positive_mdpt)
+                - (hcoef[0] / (lamda[0] * u1 + 1.0)) * (exptrm_minus[0] * exptrm_angle_mdpt - exptrm_minus_mdpt)
+                + alpha1[0] * (1.0 - exptrm_angle_mdpt)
+                + alpha2[0] * (u1 + 0.5 * dtau[0] - (dtau[0] + u1) * exptrm_angle_mdpt)
             )
             thermal_sum += flux_at_top * gweight[ng] * tweight[nt]
 
