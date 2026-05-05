@@ -305,6 +305,14 @@ class RadtranOpacities:
         self._header = self.file["header"]
         self._molecular_group = self.file["molecular"]
         self._continuum_group = self.file["continuum"]
+        if "storage_format" not in self.file.attrs:
+            raise ValueError(f"{self.opacity_filename!r} is missing required file-level storage_format attr")
+        self.storage_format = _decode_hdf5_string(self.file.attrs["storage_format"])
+        if self.storage_format not in {"log10_uint16", "log10_float32"}:
+            raise ValueError(
+                f"unsupported file-level storage_format {self.storage_format!r}; "
+                "expected 'log10_uint16' or 'log10_float32'"
+            )
 
         self.pressure = np.asarray(self._header["pressure"][:], dtype=np.float64)
         self.temperature = np.asarray(self._header["temperature"][:], dtype=np.float64)
@@ -320,15 +328,11 @@ class RadtranOpacities:
         self.nmolecular = int(len(self.molecular_names))
         self.ncontinuum = int(len(self.continuum_names))
         self.molecular_name_to_index = {name: i for i, name in enumerate(self.molecular_names)}
-        self.molecular_storage_format = np.empty(self.nmolecular, dtype=np.int64)
         self.molecular_y_min = np.empty(self.nmolecular, dtype=np.float64)
         self.molecular_y_max = np.empty(self.nmolecular, dtype=np.float64)
         for i, name in enumerate(self.molecular_names):
             dataset = self._molecular_group[name]
-            if "storage_format" not in dataset.attrs:
-                raise ValueError(f"molecular dataset {name!r} is missing required storage_format attr")
-            storage_format = _decode_hdf5_string(dataset.attrs["storage_format"])
-            self.molecular_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
+            storage_format = self.storage_format
             if storage_format == "log10_uint16":
                 if "y_min" not in dataset.attrs or "y_max" not in dataset.attrs:
                     raise ValueError(f"molecular dataset {name!r} is missing required y_min/y_max attrs")
@@ -338,15 +342,11 @@ class RadtranOpacities:
                 self.molecular_y_min[i] = np.nan
                 self.molecular_y_max[i] = np.nan
 
-        self.continuum_storage_format = np.empty(self.ncontinuum, dtype=np.int64)
         self.continuum_y_min = np.empty(self.ncontinuum, dtype=np.float64)
         self.continuum_y_max = np.empty(self.ncontinuum, dtype=np.float64)
         for i, name in enumerate(self.continuum_names):
             dataset = self._continuum_group[name]
-            if "storage_format" not in dataset.attrs:
-                raise ValueError(f"continuum dataset {name!r} is missing required storage_format attr")
-            storage_format = _decode_hdf5_string(dataset.attrs["storage_format"])
-            self.continuum_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
+            storage_format = self.storage_format
             if storage_format == "log10_uint16":
                 if "y_min" not in dataset.attrs or "y_max" not in dataset.attrs:
                     raise ValueError(f"continuum dataset {name!r} is missing required y_min/y_max attrs")
@@ -417,6 +417,13 @@ class RadtranOpacities:
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
         dtau_out = opacities_result.dtau[:chunk_width, :]
         dtau_out[:] = 0.0
+        storage_code = 0 if self.storage_format == "log10_uint16" else 1
+        if storage_code == 0:
+            molecular_raw_buffer = self.workspace.molecular_raw_u16
+            continuum_raw_buffer = self.workspace.continuum_raw_u16
+        else:
+            molecular_raw_buffer = self.workspace.molecular_raw_f32
+            continuum_raw_buffer = self.workspace.continuum_raw_f32
 
         # Set nwavelengths and wavelengths
         opacities_result.nwavelengths = chunk_width
@@ -432,21 +439,17 @@ class RadtranOpacities:
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
             dataset = self._molecular_group[species_name]
-            if self.molecular_storage_format[i_molecular] == 0:
-                raw_buffer = self.workspace.molecular_raw_u16
-            else:
-                raw_buffer = self.workspace.molecular_raw_f32
             for row_id in range(self.workspace.molecular_npairs):
                 ip = self.workspace.molecular_pair_pindex[row_id]
                 it = self.workspace.molecular_pair_tindex[row_id]
                 self._read_and_decode_opacity_row(
                     dataset,
                     np.s_[ip, it, ind_wv0:ind_wv1],
-                    self.molecular_storage_format[i_molecular],
+                    storage_code,
                     self.molecular_y_min[i_molecular],
                     self.molecular_y_max[i_molecular],
                     1.0,
-                    raw_buffer[:chunk_width],
+                    molecular_raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
             _accumulate_molecular_tau(
@@ -476,10 +479,6 @@ class RadtranOpacities:
             i_right = atmosphere_name_to_index[species_right]
             block = self.workspace.continuum_block
             dataset = self._continuum_group[continuum_name]
-            if self.continuum_storage_format[i_continuum] == 0:
-                raw_buffer = self.workspace.continuum_raw_u16
-            else:
-                raw_buffer = self.workspace.continuum_raw_f32
             _fill_cia_scale_workspace(
                 atmosphere,
                 i_left,
@@ -491,11 +490,11 @@ class RadtranOpacities:
                 self._read_and_decode_opacity_row(
                     dataset,
                     np.s_[it, ind_wv0:ind_wv1],
-                    self.continuum_storage_format[i_continuum],
+                    storage_code,
                     self.continuum_y_min[i_continuum],
                     self.continuum_y_max[i_continuum],
                     CIA_AMAGAT_TO_MOLECULE_CM,
-                    raw_buffer[:chunk_width],
+                    continuum_raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
 
