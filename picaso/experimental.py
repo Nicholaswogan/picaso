@@ -1206,7 +1206,6 @@ def convert_sqlite_to_hdf5(
                     shuffle=shuffle,
                     chunks=molecular_chunks,
                 )
-                dataset.attrs["storage_format"] = storage_format
                 dataset.attrs["log10_floor"] = float(molecular_log10_floor)
                 if storage_format == "log10_uint16":
                     dataset.attrs["y_min"] = np.float64(y_min)
@@ -1293,7 +1292,6 @@ def convert_sqlite_to_hdf5(
                     shuffle=shuffle,
                     chunks=continuum_chunks,
                 )
-                dataset.attrs["storage_format"] = storage_format
                 dataset.attrs["log10_floor"] = float(continuum_log10_floor)
                 if storage_format == "log10_uint16":
                     dataset.attrs["y_min"] = np.float64(y_min)
