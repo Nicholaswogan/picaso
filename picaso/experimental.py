@@ -165,6 +165,8 @@ class RadtranSettings:
     numg: int = 1
     numt: int = 1
     phase_angle: float = 0.0
+    effective_numg: int = 1
+    effective_numt: int = 1
 
     gangle: np.ndarray = None
     gweight: np.ndarray = None
@@ -187,14 +189,31 @@ class RadtranSettings:
             raise ValueError(f"numt must be positive, got {self.numt}")
         if not isinstance(self.hard_surface, bool):
             raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
+        if self.phase_angle < 0.0 or self.phase_angle > 2.0 * np.pi:
+            raise ValueError(
+                f"phase_angle must be between 0 and 2*pi radians, got {self.phase_angle}"
+            )
+        if self.numt == 1 and self.numg == 1:
+            raise ValueError("numg cannot be 1 when using the 1D symmetry geometry")
 
     def _refresh_geometry(self):
         if self.numt == 1:
-            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_1d(self.numg)
+            if self.phase_angle != 0.0:
+                raise ValueError(
+                    "1D symmetry geometry only supports phase_angle == 0.0; "
+                    f"got {self.phase_angle}"
+                )
+            self.effective_numg = min(max(int(self.numg / 2), 5), 8)
+            self.effective_numt = 1
+            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_1d(self.effective_numg)
         else:
-            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(self.numg, self.numt)
+            self.effective_numg = int(self.numg)
+            self.effective_numt = int(self.numt)
+            self.gangle, self.gweight, self.tangle, self.tweight = get_angles_3d(
+                self.effective_numg, self.effective_numt
+            )
         self.ubar0, self.ubar1, self.cos_theta, self.latitude, self.longitude = compute_disco(
-            self.numg, self.numt, self.gangle, self.tangle, self.phase_angle
+            self.effective_numg, self.effective_numt, self.gangle, self.tangle, self.phase_angle
         )
 
     def update(self, **kwargs):
