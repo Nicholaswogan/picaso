@@ -306,24 +306,12 @@ class RadtranOpacities:
         self._molecular_group = self.file["molecular"]
         self._continuum_group = self.file["continuum"]
 
-        self.format_version = _decode_hdf5_string(self.file.attrs.get("format_version", "unknown"))
-        self.opacity_type = _decode_hdf5_string(self.file.attrs.get("opacity_type", "unknown"))
-        self.storage_format = _decode_hdf5_string(self.file.attrs.get("storage_format", "unknown"))
-
         self.pressure = np.asarray(self._header["pressure"][:], dtype=np.float64)
         self.temperature = np.asarray(self._header["temperature"][:], dtype=np.float64)
         self.wavelength = np.asarray(self._header["wavelength"][:], dtype=np.float64)
         self.continuum_temperatures = np.asarray(self._header["continuum_temperatures"][:], dtype=np.float64)
         self.molecular_names = [str(name) for name in _decode_hdf5_string(self._header["molecular_names"][:])]
         self.continuum_names = [str(name) for name in _decode_hdf5_string(self._header["continuum_names"][:])]
-
-        self.pressure_unit = _decode_hdf5_string(self._header.attrs.get("pressure_unit", ""))
-        self.temperature_unit = _decode_hdf5_string(self._header.attrs.get("temperature_unit", ""))
-        self.wavelength_unit = _decode_hdf5_string(self._header.attrs.get("wavelength_unit", ""))
-        self.molecular_unit = _decode_hdf5_string(self._header.attrs.get("molecular_unit", ""))
-        self.continuum_unit = _decode_hdf5_string(self._header.attrs.get("continuum_unit", ""))
-        self.molecular_log10_floor = float(self._header.attrs.get("molecular_log10_floor", 0.0))
-        self.continuum_log10_floor = float(self._header.attrs.get("continuum_log10_floor", 0.0))
 
         self.npressure = int(self.pressure.size)
         self.ntemperature = int(self.temperature.size)
@@ -332,17 +320,18 @@ class RadtranOpacities:
         self.nmolecular = int(len(self.molecular_names))
         self.ncontinuum = int(len(self.continuum_names))
         self.molecular_name_to_index = {name: i for i, name in enumerate(self.molecular_names)}
-        self.continuum_name_to_index = {name: i for i, name in enumerate(self.continuum_names)}
         self.molecular_storage_format = np.empty(self.nmolecular, dtype=np.int64)
-        self.molecular_log10_floor = np.empty(self.nmolecular, dtype=np.float64)
         self.molecular_y_min = np.empty(self.nmolecular, dtype=np.float64)
         self.molecular_y_max = np.empty(self.nmolecular, dtype=np.float64)
         for i, name in enumerate(self.molecular_names):
             dataset = self._molecular_group[name]
-            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
+            if "storage_format" not in dataset.attrs:
+                raise ValueError(f"molecular dataset {name!r} is missing required storage_format attr")
+            storage_format = _decode_hdf5_string(dataset.attrs["storage_format"])
             self.molecular_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
-            self.molecular_log10_floor[i] = float(dataset.attrs.get("log10_floor", self.molecular_log10_floor))
             if storage_format == "log10_uint16":
+                if "y_min" not in dataset.attrs or "y_max" not in dataset.attrs:
+                    raise ValueError(f"molecular dataset {name!r} is missing required y_min/y_max attrs")
                 self.molecular_y_min[i] = float(dataset.attrs["y_min"])
                 self.molecular_y_max[i] = float(dataset.attrs["y_max"])
             else:
@@ -350,15 +339,17 @@ class RadtranOpacities:
                 self.molecular_y_max[i] = np.nan
 
         self.continuum_storage_format = np.empty(self.ncontinuum, dtype=np.int64)
-        self.continuum_log10_floor = np.empty(self.ncontinuum, dtype=np.float64)
         self.continuum_y_min = np.empty(self.ncontinuum, dtype=np.float64)
         self.continuum_y_max = np.empty(self.ncontinuum, dtype=np.float64)
         for i, name in enumerate(self.continuum_names):
             dataset = self._continuum_group[name]
-            storage_format = _decode_hdf5_string(dataset.attrs.get("storage_format", self.storage_format))
+            if "storage_format" not in dataset.attrs:
+                raise ValueError(f"continuum dataset {name!r} is missing required storage_format attr")
+            storage_format = _decode_hdf5_string(dataset.attrs["storage_format"])
             self.continuum_storage_format[i] = 0 if storage_format == "log10_uint16" else 1
-            self.continuum_log10_floor[i] = float(dataset.attrs.get("log10_floor", self.continuum_log10_floor))
             if storage_format == "log10_uint16":
+                if "y_min" not in dataset.attrs or "y_max" not in dataset.attrs:
+                    raise ValueError(f"continuum dataset {name!r} is missing required y_min/y_max attrs")
                 self.continuum_y_min[i] = float(dataset.attrs["y_min"])
                 self.continuum_y_max[i] = float(dataset.attrs["y_max"])
             else:
