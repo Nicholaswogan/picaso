@@ -915,9 +915,10 @@ class RadtranAtmosphere:
         self._ensure(atm.nlayers, atm.nspecies)
 
         # Copy over information in Atmosphere_ and Planet.
-        self.radius = planet.radius
-        self.mass = planet.mass
-        self.semimajor = planet.semimajor
+        # Planet inputs are stored in Earth/AU units; keep CGS internally here.
+        self.radius = planet.radius * R_EARTH_CGS
+        self.mass = planet.mass * M_EARTH_CGS
+        self.semimajor = planet.semimajor * 1.495978707e13
 
         self.nlayers = atm.nlayers
         self.nspecies = atm.nspecies
@@ -942,9 +943,9 @@ class RadtranAtmosphere:
         if iref == self.nlayers:
             iref = self.nlayers - 1
 
-        # Get planet radius and mass in CGS units.
-        planet_radius = self.radius * R_EARTH_CGS
-        planet_mass = self.mass * M_EARTH_CGS
+        # Planet radius, mass, and semimajor axis are already in CGS units.
+        planet_radius = self.radius
+        planet_mass = self.mass
 
         # z is the altitude at the midpoint of each cell, and should decrease
         # with increasing index because pressure increases with index.
@@ -1086,8 +1087,13 @@ class Radtran:
         )
     
     def _radiate_reflected(self, ind_wv0, ind_wv1):
-        chunk_width = ind_wv1 - ind_wv0
 
+        if not np.isfinite(self.atmosphere.semimajor) or self.atmosphere.semimajor <= 0.0:
+            raise ValueError(
+                f"reflected light requires a finite positive semimajor axis, got {self.atmosphere.semimajor}"
+            )
+        
+        chunk_width = ind_wv1 - ind_wv0
         # Legacy reflected-light defaults for inputs not yet carried on the new API.
         single_phase = 0
         multi_phase = 0
@@ -1098,9 +1104,6 @@ class Radtran:
         constant_forward = 0.39
         toon_coefficients = 0
         b_top = 0.0
-
-        self.reflected._ensure(self.atmosphere.nlayers)
-        self.reflected_result._ensure(self.opacities.nwavelength)
 
         get_reflected_1d(
             self.reflected,
@@ -1143,6 +1146,9 @@ class Radtran:
             b_top,
             self.reflected_result,
         )
+
+        fpfs_scale = (self.atmosphere.radius / self.atmosphere.semimajor) ** 2.0
+        self.reflected_result.fpfs[ind_wv0:ind_wv1] = self.reflected_result.albedo[ind_wv0:ind_wv1] * fpfs_scale
 
     def _radiate(self, ind_wv0, ind_wv1, calculation):
         if calculation == 'thermal':
