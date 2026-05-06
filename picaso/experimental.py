@@ -17,6 +17,8 @@ from numba import typed
 from .elements import ELEMENTS
 from .disco import compute_disco, get_angles_1d, get_angles_3d
 from .experimental_fluxes import ThermalResult, ThermalSolver, get_thermal_1d
+from .experimental_rayleigh import compute_sigma as compute_rayleigh_sigma
+from .experimental_rayleigh import RAYLEIGH_MOLECULES
 
 # cgs constants for the compiled hydrostatic setup
 KB_CGS = 1.380649e-16
@@ -25,6 +27,8 @@ G_CGS = 6.67430e-8
 M_EARTH_CGS = 5.9722e27
 R_EARTH_CGS = 6.371e8
 CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
+# Convert number column density to molar column density for legacy Rayleigh parity.
+AVOGADRO = 6.02214076e23
 
 
 def separate_molecule_name(molecule_name):
@@ -327,6 +331,7 @@ class RadtranOpacitiesWorkspace:
     molecular_raw_f32: nb.float32[:]
     continuum_raw_u16: nb.uint16[:]
     continuum_raw_f32: nb.float32[:]
+    rayleigh_sigma: nb.float64[:]
 
     def __init__(self):
         self._allocate(0, 0, 0, 0, 0)
@@ -360,6 +365,7 @@ class RadtranOpacitiesWorkspace:
         self.molecular_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
         self.continuum_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
         self.continuum_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
+        self.rayleigh_sigma = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
     def _ensure(self, nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk):
         if (
@@ -498,8 +504,6 @@ class RadtranOpacities:
     def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
-        dtau_out = opacities_result.dtau[:chunk_width, :]
-        dtau_out[:] = 0.0
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
         if storage_code == 0:
             molecular_raw_buffer = self.workspace.molecular_raw_u16
@@ -513,7 +517,9 @@ class RadtranOpacities:
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
         opacities_result.surf_reflect[:chunk_width] = 0.0
 
-        # Loop over atmospheric species and accumulate molecular opacities.
+        # Line by line
+        taugas = opacities_result.taugas[:chunk_width, :]
+        taugas[:] = 0.0
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
@@ -544,10 +550,10 @@ class RadtranOpacities:
                 self.workspace.molecular_temperature_ind0,
                 self.workspace.molecular_temperature_ind1,
                 self.workspace.molecular_temperature_weight,
-                dtau_out,
+                taugas,
             )
 
-        # Loop over CIA continuum opacities.
+        # CIA & continuum
         atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
 
         for i_continuum, continuum_name in enumerate(self.continuum_names):
@@ -587,12 +593,25 @@ class RadtranOpacities:
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
                 self.workspace.continuum_temperature_weight,
-                dtau_out,
+                taugas,
             )
 
-        # experimental_rayleigh.compute_sigma(species, wl, sigma)
-        opacities_result.w0[:chunk_width, :] = 1.0e-8
-        opacities_result.cosb[:chunk_width, :] = 0.0
+        # Rayleigh
+        tauray = opacities_result.tauray[:chunk_width, :]
+        tauray[:,:] = 0.0
+        rayleigh_sigma = self.workspace.rayleigh_sigma[:chunk_width]
+        wavelength_chunk = self.wavelength[ind_wv0:ind_wv1]
+        for i_species in range(atmosphere.nspecies):
+            species_name = str(atmosphere.species_names[i_species])
+            if species_name not in RAYLEIGH_MOLECULES:
+                continue
+
+            compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
+            _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.columns[i_species], tauray)
+
+
+        # Finish
+        _finish_compute_opacity(opacities_result, chunk_width)
 
 
     def close(self) -> None:
@@ -749,6 +768,30 @@ def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, ta
         for iw in range(nwavelengths):
             tau_out[iw, i] += (c0 * block[it0, iw] + c1 * block[it1, iw]) * scale
 
+
+@nb.njit
+def _accumulate_rayleigh_tau(sigma_row, columns_row, tau_out):
+    nwavelengths = sigma_row.shape[0]
+    nlayers = columns_row.shape[0]
+
+    for iw in range(nwavelengths):
+        sigma = sigma_row[iw]
+        for i in range(nlayers):
+            tau_out[iw, i] += sigma * (columns_row[i] / AVOGADRO)
+
+@nb.njit
+def _finish_compute_opacity(result, chunk_width):
+    for iw in range(chunk_width):
+        for i in range(result.nlayers):
+            tauray = result.tauray[iw,i]
+            dtau = result.taugas[iw,i] + tauray
+            result.dtau[iw,i] = dtau
+            if dtau > 0:
+                result.w0[iw,i] = np.minimum(np.maximum(tauray/dtau, 1.0e-8), 1.0 - 1.0e-8)
+            else:
+                result.w0[iw,i] = 1.0e-8
+            result.cosb[iw,i] = 0.0
+
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
 
@@ -758,7 +801,8 @@ class RadtranOpacitiesResult:
     nwavelengths : nb.int64
     wavelength_um : nb.float64[:]
 
-    # Layer optical depth, chunk-major.
+    taugas : nb.float64[:,:]
+    tauray : nb.float64[:,:]
     dtau : nb.float64[:,:]
     w0 : nb.float64[:,:]
     cosb : nb.float64[:,:]
@@ -772,6 +816,8 @@ class RadtranOpacitiesResult:
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
         self.nwavelengths = 0
         self.wavelength_um = np.empty(nwavelengths_per_chunk, dtype=np.float64)
+        self.taugas = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.tauray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)

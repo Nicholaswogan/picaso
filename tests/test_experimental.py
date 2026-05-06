@@ -9,7 +9,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from picaso import disco
+from picaso import atmsetup
 from picaso import fluxes
+from picaso import experimental
 from picaso import experimental_fluxes
 
 
@@ -132,3 +134,32 @@ def test_experimental_thermal_toa_parity(hard_surface):
     np.testing.assert_allclose(actual.thermal[ind_wv0:ind_wv1], expected[ind_wv0:ind_wv1], rtol=1e-12, atol=1e-12)
     assert np.all(np.isnan(actual.thermal[:ind_wv0]))
     assert np.all(np.isnan(actual.thermal[ind_wv1:]))
+
+
+def test_get_weights_parity():
+    species = ["H2O", "CO2", "12C_16O2", "13C_16O2", "12C_O2", "HCCCN"]
+    old_weights = atmsetup.ATMSETUP.get_weights(None, species)
+    new_weights = experimental.get_weights(species)
+    assert old_weights.keys() == set(species)
+    np.testing.assert_allclose(
+        new_weights,
+        np.array([old_weights[name] for name in species], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_atmosphere_auto_species_mu():
+    species = ["H2O", "CO2", "CH4"]
+    pressures = np.array([1.0e-6, 1.0e-4, 1.0e-2], dtype=np.float64)
+    temperatures = np.array([300.0, 250.0, 200.0], dtype=np.float64)
+    mixing_ratios = np.array(
+        [
+            [1.0e-3, 2.0e-3, 3.0e-3],
+            [4.0e-4, 5.0e-4, 6.0e-4],
+            [0.9996, 0.9975, 0.9964],
+        ],
+        dtype=np.float64,
+    )
+    atm = experimental.Atmosphere(species, pressures, temperatures, mixing_ratios)
+    np.testing.assert_allclose(atm._atm.species_mu, experimental.get_weights(species))

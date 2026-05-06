@@ -76,10 +76,14 @@ def rayleigh_CH4(wl, nu):
 def rayleigh_CO2(wl, nu):
     """Returns polarisability and King correction factur using formula from Hohm, 1993
     
-    Notes 
+    Notes
     -----
     .. [1] A. Bideau-Mehu, Y. Guern, R. Abjean and A. Johannin-Gilles. Interferometric determination of the refractive index of carbon dioxide in the ultraviolet region, Opt. Commun. 9, 432-434 (1973)
     """
+    if wl < 0.10:
+        # Clamp below the fit domain to avoid the unphysical UV pole.
+        wl = 0.10
+        nu = 1.0e4 / wl
     f_par = 6.00332
     w_par_sq = 0.22525399 
     f_perp = 8.54433 
@@ -100,6 +104,10 @@ def rayleigh_H2(wl, nu):
     -----
     .. [1] Peck, E. R., & Huang, S. 1977, JOSA, 67, 1550
     """
+    if wl < 0.095:
+        # Clamp below the fit domain to avoid the unphysical UV pole.
+        wl = 0.095
+        nu = 1.0e4 / wl
     f_par = 1.62632
     w_par_sq = 0.23940245
     f_perp = 1.40105
@@ -206,6 +214,10 @@ def rayleigh_NH3(wl, nu):
     .. [1] C. Cuthbertson and C. Cuthbertson. On the refraction and dispersion of the halogens, halogen acids, ozone, steam, oxides of nitrogen and ammonia, Phil. Trans. R. Soc. Lond. A 213, 1-26 (1914)
     .. [2] Hohm, U. 1993. Mol. Phys., 78: 929
     """
+    if wl < 0.16:
+        # Clamp below the fit domain to avoid the unphysical UV pole.
+        wl = 0.16
+        nu = 1.0e4 / wl
     f_par = 1.28964
     w_par_sq = 0.08454599
     f_perp = 10.84943
@@ -227,6 +239,10 @@ def rayleigh_O2(wl, nu):
     .. [1] P. L. Smith, M. C. E. Huber, W. H. Parkinson. Refractivities of H2, He, O2, CO, and Kr for 168≤λ≤288 nm Phys Rev. A 13, 199-203 (1976)
     .. [2] Hohm, U. 1993. Mol. Phys., 78: 929
     """
+    if wl < 0.11:
+        # Clamp below the fit domain to avoid the unphysical UV pole.
+        wl = 0.11
+        nu = 1.0e4 / wl
     f_par = 2.74876
     w_par_sq = 0.18095751
     f_perp = 4.86007
@@ -274,18 +290,20 @@ RAYLEIGH_KING_CORRECTION_NO_WAVE = {
     "H2S": 1.001880,  "SO2": 1.062638
 }
 
+RAYLEIGH_MOLECULES = list(RAYLEIGH_POLARISABILITIES.keys())
+
 ###
 ### Drivers
 ###
 
-@nb.njit(types.void(types.FunctionType(SIGNATURE), types.float64[:], types.float64[:]), cache=True)
+@nb.njit(cache=True)
 def _compute_sigma(fcn, wl, sigma):
     for i in range(len(wl)):
         nu = 1.0e4/wl[i]
         eta, F = fcn(wl[i], nu)
         sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
 
-@nb.njit(types.void(types.float64[:], types.float64[:], types.float64, types.float64), cache=True)
+@nb.njit(cache=True)
 def _compute_sigma_default(wl, sigma, eta, F):
     for i in range(len(wl)):
         nu = 1.0e4 / wl[i]
