@@ -513,7 +513,6 @@ class RadtranOpacities:
             continuum_raw_buffer = self.workspace.continuum_raw_f32
 
         # Set nwavelengths and wavelengths
-        opacities_result.nwavelengths = chunk_width
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
         opacities_result.surf_reflect[:chunk_width] = 0.0
 
@@ -781,32 +780,69 @@ def _accumulate_rayleigh_tau(sigma_row, columns_row, tau_out):
 
 @nb.njit
 def _finish_compute_opacity(result, chunk_width):
+
+    stream = 2.0
+    
     for iw in range(chunk_width):
+        running_tau = 0.0
+        running_tau_dedd = 0.0
+        result.tau[iw, 0] = 0.0
+        result.tau_dedd[iw, 0] = 0.0
+
         for i in range(result.nlayers):
             tauray = result.tauray[iw,i]
             dtau = result.taugas[iw,i] + tauray
             result.dtau[iw,i] = dtau
+            running_tau += dtau
+            result.tau[iw, i+1] = running_tau
             if dtau > 0:
-                result.w0[iw,i] = np.minimum(np.maximum(tauray/dtau, 1.0e-8), 1.0 - 1.0e-8)
+                w0 = np.minimum(np.maximum(tauray/dtau, 1.0e-8), 1.0 - 1.0e-8)
             else:
-                result.w0[iw,i] = 1.0e-8
-            result.cosb[iw,i] = 0.0
+                w0 = 1.0e-8
+            result.w0[iw,i] = w0
 
+            cosb = 0.0
+            result.cosb[iw,i] = cosb
+            result.ftau_cld[iw,i] = 0.0
+            result.ftau_ray[iw,i] = 1.0
+            result.gcos2[iw,i] = 0.5 * result.ftau_ray[iw,i]
+
+            # Now delta eddington
+            f_deltaM = cosb**stream
+            w0_dedd = w0*(1.0 - f_deltaM)/(1.0 - w0*f_deltaM)
+            cosb_dedd = (cosb - f_deltaM)/(1.0 - f_deltaM)
+            dtau_dedd = dtau*(1.0 - w0*f_deltaM)
+            running_tau_dedd += dtau_dedd
+            result.w0_dedd[iw,i] = w0_dedd
+            result.cosb_dedd[iw,i] = cosb_dedd
+            result.dtau_dedd[iw,i] = dtau_dedd
+            result.tau_dedd[iw, i+1] = running_tau_dedd
+        
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
 
     # Dimensions
     nlayers : nb.int64
     nwavelengths_per_chunk : nb.int64
-    nwavelengths : nb.int64
-    wavelength_um : nb.float64[:]
 
+    wavelength_um : nb.float64[:]
+    surf_reflect : nb.float64[:]
     taugas : nb.float64[:,:]
     tauray : nb.float64[:,:]
+
+    dtau_dedd : nb.float64[:,:]
+    tau_dedd : nb.float64[:,:]
+    w0_dedd : nb.float64[:,:]
+    cosb_dedd : nb.float64[:,:]
+
+    ftau_cld : nb.float64[:,:]
+    ftau_ray : nb.float64[:,:]
+    gcos2 : nb.float64[:,:]
+
     dtau : nb.float64[:,:]
+    tau : nb.float64[:,:]
     w0 : nb.float64[:,:]
     cosb : nb.float64[:,:]
-    surf_reflect : nb.float64[:]
 
     def __init__(self):
         self._allocate(0, 0)
@@ -814,14 +850,25 @@ class RadtranOpacitiesResult:
     def _allocate(self, nlayers, nwavelengths_per_chunk):
         self.nlayers = nlayers
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
-        self.nwavelengths = 0
+
         self.wavelength_um = np.empty(nwavelengths_per_chunk, dtype=np.float64)
+        self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
         self.taugas = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.tauray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+
+        self.dtau_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.tau_dedd = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
+        self.w0_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.cosb_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+
+        self.ftau_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.ftau_ray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.gcos2 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+
         self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.tau = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
     def _ensure(self, nlayers, nwavelengths_per_chunk):
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
