@@ -254,21 +254,93 @@ def rayleigh_O2(wl, nu):
     F = get_king_correction(alpha, gamma)
     return eta, F
 
+@nb.njit(cache=True)
+def _compute_sigma_CH4(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_CH4(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_CO2(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_CO2(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_H2(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_H2(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_H2O(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_H2O(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_He(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_He(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_N2(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_N2(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_N2O(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_N2O(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_NH3(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_NH3(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
+
+@nb.njit(cache=True)
+def _compute_sigma_O2(wl, sigma):
+    for i in range(len(wl)):
+        nu = 1.0e4 / wl[i]
+        eta, F = rayleigh_O2(wl[i], nu)
+        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
+
 ###
 ### Global dictionaries
 ###
 
 RAYLEIGH_FCNS = {
-    'CH4': rayleigh_CH4,
-    'CO2': rayleigh_CO2,
-    'H2': rayleigh_H2,
-    'H2O': rayleigh_H2O,
-    'He': rayleigh_He,
-    'N2': rayleigh_N2,
-    'N2O': rayleigh_N2O,
-    'NH3': rayleigh_NH3,
-    'O2': rayleigh_O2,
+    'CH4': _compute_sigma_CH4,
+    'CO2': _compute_sigma_CO2,
+    'H2': _compute_sigma_H2,
+    'H2O': _compute_sigma_H2O,
+    'He': _compute_sigma_He,
+    'N2': _compute_sigma_N2,
+    'N2O': _compute_sigma_N2O,
+    'NH3': _compute_sigma_NH3,
+    'O2': _compute_sigma_O2,
 }
+
 
 
 RAYLEIGH_POLARISABILITIES = {
@@ -297,13 +369,6 @@ RAYLEIGH_MOLECULES = list(RAYLEIGH_POLARISABILITIES.keys())
 ###
 
 @nb.njit(cache=True)
-def _compute_sigma(fcn, wl, sigma):
-    for i in range(len(wl)):
-        nu = 1.0e4/wl[i]
-        eta, F = fcn(wl[i], nu)
-        sigma[i] = compute_sigma_from_eta_F(nu, eta, F)
-
-@nb.njit(cache=True)
 def _compute_sigma_default(wl, sigma, eta, F):
     for i in range(len(wl)):
         nu = 1.0e4 / wl[i]
@@ -320,7 +385,7 @@ def compute_sigma(species, wl, sigma):
     # Specialized case
     fcn = RAYLEIGH_FCNS.get(species)
     if fcn is not None:
-        _compute_sigma(fcn, wl, sigma)
+        fcn(wl, sigma)
         return
     
     # Default case

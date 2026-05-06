@@ -386,7 +386,7 @@ class RadtranOpacitiesWorkspace:
 
 class RadtranOpacities:
 
-    def __init__(self, opacity_filename):
+    def __init__(self, opacity_filename, wavelength_range=None):
 
         if not isinstance(opacity_filename, (str, Path)):
             raise TypeError(
@@ -412,10 +412,38 @@ class RadtranOpacities:
 
         self.pressure = np.asarray(self._header["pressure"][:], dtype=np.float64)
         self.temperature = np.asarray(self._header["temperature"][:], dtype=np.float64)
-        self.wavelength = np.asarray(self._header["wavelength"][:], dtype=np.float64)
+        wavelength = np.asarray(self._header["wavelength"][:], dtype=np.float64)
         self.continuum_temperatures = np.asarray(self._header["continuum_temperatures"][:], dtype=np.float64)
         self.molecular_names = [str(name) for name in _decode_hdf5_string(self._header["molecular_names"][:])]
         self.continuum_names = [str(name) for name in _decode_hdf5_string(self._header["continuum_names"][:])]
+
+        if wavelength_range is not None:
+            if len(wavelength_range) != 2:
+                raise ValueError(
+                    "wavelength_range must be a (min_wavelength, max_wavelength) pair"
+                )
+            wmin = float(wavelength_range[0])
+            wmax = float(wavelength_range[1])
+            if not np.isfinite(wmin) or not np.isfinite(wmax):
+                raise ValueError("wavelength_range must contain finite values")
+            if wmin > wmax:
+                raise ValueError(
+                    f"wavelength_range minimum must not exceed maximum, got {wmin} > {wmax}"
+                )
+            selected = np.flatnonzero((wavelength >= wmin) & (wavelength <= wmax))
+            if selected.size == 0:
+                raise ValueError(
+                    f"wavelength_range {wavelength_range!r} selects no wavelengths from the file"
+                )
+            if selected.size > 1 and np.any(np.diff(selected) != 1):
+                raise ValueError(
+                    "wavelength_range must select a contiguous block of wavelengths"
+                )
+            self.wavelength_source_indices = selected.astype(np.int64)
+            self.wavelength = wavelength[self.wavelength_source_indices]
+        else:
+            self.wavelength_source_indices = np.arange(wavelength.size, dtype=np.int64)
+            self.wavelength = wavelength
 
         self.npressure = int(self.pressure.size)
         self.ntemperature = int(self.temperature.size)
@@ -526,6 +554,8 @@ class RadtranOpacities:
         # Line by line
         taugas = opacities_result.taugas[:chunk_width, :]
         taugas[:] = 0.0
+        source_wv0 = self.wavelength_source_indices[ind_wv0]
+        source_wv1 = self.wavelength_source_indices[ind_wv1 - 1] + 1
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
@@ -539,7 +569,7 @@ class RadtranOpacities:
                 it = self.workspace.molecular_pair_tindex[row_id]
                 self._read_and_decode_opacity_row(
                     dataset,
-                    np.s_[ip, it, ind_wv0:ind_wv1],
+                    np.s_[ip, it, source_wv0:source_wv1],
                     storage_code,
                     self.molecular_y_min[i_molecular],
                     self.molecular_y_max[i_molecular],
@@ -584,7 +614,7 @@ class RadtranOpacities:
                 it = self.workspace.continuum_temperature_load_idx[row_id]
                 self._read_and_decode_opacity_row(
                     dataset,
-                    np.s_[it, ind_wv0:ind_wv1],
+                    np.s_[it, source_wv0:source_wv1],
                     storage_code,
                     self.continuum_y_min[i_continuum],
                     self.continuum_y_max[i_continuum],
@@ -1017,10 +1047,16 @@ class RadtranAtmosphere:
 class Radtran:
     "Radiative-transfer driver."
 
-    def __init__(self, opacity_filename: str, nwavelengths_per_chunk=None, settings_kwargs=None):
+    def __init__(
+        self,
+        opacity_filename: str,
+        nwavelengths_per_chunk=None,
+        wavelength_range=None,
+        settings_kwargs=None,
+    ):
 
         # Opacities
-        self.opacities = RadtranOpacities(opacity_filename)
+        self.opacities = RadtranOpacities(opacity_filename, wavelength_range=wavelength_range)
         self.opacities_result = RadtranOpacitiesResult()
 
         # Work out the wavelength chunking
