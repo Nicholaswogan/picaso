@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import io
 import sqlite3
+import re
 
 import h5py
 import numpy as np
 import numba as nb
 from numba import typed
 
+from .elements import ELEMENTS
 from .disco import compute_disco, get_angles_1d, get_angles_3d
 from .experimental_fluxes import ThermalResult, ThermalSolver, get_thermal_1d
 
@@ -23,6 +25,64 @@ G_CGS = 6.67430e-8
 M_EARTH_CGS = 5.9722e27
 R_EARTH_CGS = 6.371e8
 CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
+
+
+def separate_molecule_name(molecule_name):
+    """Separate a molecule string into element/isotope tokens."""
+    return re.findall(r'[A-Z][a-z]?\d*|\d+', molecule_name)
+
+
+def separate_string_number(string):
+    """Separate a token into alphabetic and numeric parts."""
+    return re.findall(r'[A-Za-z]+|\d+', string)
+
+
+def get_weights(molecule):
+    """Return molecular weights for one species or a list of species.
+
+    This matches the legacy `atmsetup.py:get_weights` behavior, including
+    isotope parsing and defaulting to the most abundant isotope when a species
+    is not explicitly isotopically labeled.
+    """
+    separator = '_'
+    if isinstance(molecule, str):
+        molecule = [molecule]
+    elif not isinstance(molecule, list):
+        molecule = list(molecule)
+
+    weights = np.empty(len(molecule), dtype=np.float64)
+    for i, species in enumerate(molecule):
+        totmass = 0.0
+        if separator in species:
+            elements = [separate_molecule_name(j) for j in species.split(separator)]
+        else:
+            elements = separate_molecule_name(species)
+
+        for iele in elements:
+            if isinstance(iele, list):
+                if len(iele) == 1:
+                    iele = iele[0]
+                    iso_num = 'main'
+                else:
+                    iso_num = int(iele[0])
+                    iele = iele[1]
+            else:
+                iso_num = 'main'
+
+            sep = separate_string_number(iele)
+            if len(sep) == 1:
+                el, num = sep[0], 1
+            else:
+                el, num = sep
+
+            if iso_num == 'main':
+                main_iso = np.argmax([ELEMENTS[el].isotopes[j].abundance for j in ELEMENTS[el].isotopes.keys()])
+                iso_num = list(ELEMENTS[el].isotopes.keys())[main_iso]
+            totmass += ELEMENTS[el].isotopes[iso_num].mass * float(num)
+
+        weights[i] = totmass
+
+    return weights
 
 @nb.experimental.jitclass
 class Atmosphere_:
@@ -37,7 +97,7 @@ class Atmosphere_:
     mixing_ratios: nb.float64[:,:]
     reference_pressure: nb.float64
 
-    def __init__(self, species_names, pressures, temperatures, mixing_ratios, reference_pressure):
+    def __init__(self, species_names, species_mu, pressures, temperatures, mixing_ratios, reference_pressure):
         
         # Check dimensions
         nspecies, nlayers = mixing_ratios.shape
@@ -47,6 +107,11 @@ class Atmosphere_:
             raise ValueError(
                 "species_names length must match mixing_ratios.shape[0] "
                 f"({len(species_names)} != {nspecies})"
+            )
+        if species_mu.shape[0] != nspecies:
+            raise ValueError(
+                "species_mu length must match mixing_ratios.shape[0] "
+                f"({species_mu.shape[0]} != {nspecies})"
             )
         if pressures.shape[0] != nlayers:
             raise ValueError(
@@ -110,6 +175,7 @@ class Atmosphere_:
         self.nspecies = nspecies
         self.nlayers = nlayers
         self.species_names = species_names
+        self.species_mu = species_mu
         self.pressures = pressures
         self.temperatures = temperatures
         self.mixing_ratios = mixing_ratios
@@ -122,20 +188,18 @@ class Atmosphere:
         if not isinstance(species_names, list):
             raise TypeError(f"species_names must be a list, got {type(species_names)!r}")
 
+        if species_mu is None:
+            species_mu = get_weights(species_names)
+
         # Initialize most terms
         atm = Atmosphere_(
             typed.List(species_names),
+            species_mu,
             pressures,
             temperatures,
             mixing_ratios,
             reference_pressure,
         )
-
-        if species_mu is None:
-            # Get mu for each species
-            atm.species_mu = np.ones(atm.nspecies) * 2.0  # g/mol
-        else:
-            atm.species_mu = species_mu
 
         self._atm = atm
     
@@ -526,7 +590,7 @@ class RadtranOpacities:
                 dtau_out,
             )
 
-        # For now w0 and cosb are zero.
+        # experimental_rayleigh.compute_sigma(species, wl, sigma)
         opacities_result.w0[:chunk_width, :] = 1.0e-8
         opacities_result.cosb[:chunk_width, :] = 0.0
 
