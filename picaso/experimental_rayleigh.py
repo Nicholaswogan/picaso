@@ -239,8 +239,21 @@ def rayleigh_O2(wl, nu):
     return eta, F
 
 ###
-### For default Rayleigh
+### Global dictionaries
 ###
+
+RAYLEIGH_FCNS = {
+    'CH4': rayleigh_CH4,
+    'CO2': rayleigh_CO2,
+    'H2': rayleigh_H2,
+    'H2O': rayleigh_H2O,
+    'He': rayleigh_He,
+    'N2': rayleigh_N2,
+    'N2O': rayleigh_N2O,
+    'NH3': rayleigh_NH3,
+    'O2': rayleigh_O2,
+}
+
 
 RAYLEIGH_POLARISABILITIES = {
     'H2':  0.80e-24,  'He':  0.21e-24, 'N2':   1.74e-24,  'O2':  1.58e-24, 
@@ -300,15 +313,3 @@ def compute_sigma(species, wl, sigma):
         eta = get_Lorentz_Lorenz(alpha)
     F = RAYLEIGH_KING_CORRECTION_NO_WAVE.get(species, 1.0)
     _compute_sigma_default(wl, sigma, eta, F)
-
-RAYLEIGH_FCNS = {
-    'CH4': rayleigh_CH4,
-    'CO2': rayleigh_CO2,
-    'H2': rayleigh_H2,
-    'H2O': rayleigh_H2O,
-    'He': rayleigh_He,
-    'N2': rayleigh_N2,
-    'N2O': rayleigh_N2O,
-    'NH3': rayleigh_NH3,
-    'O2': rayleigh_O2,
-}
