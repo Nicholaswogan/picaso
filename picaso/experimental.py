@@ -16,7 +16,14 @@ from numba import typed
 
 from .elements import ELEMENTS
 from .disco import compute_disco, get_angles_1d, get_angles_3d
-from .experimental_fluxes import ThermalResult, ThermalSolver, get_thermal_1d
+from .experimental_fluxes import (
+    ReflectedResult,
+    ReflectedSolver,
+    ThermalResult,
+    ThermalSolver,
+    get_reflected_1d,
+    get_thermal_1d,
+)
 from .experimental_rayleigh import compute_sigma as compute_rayleigh_sigma
 from .experimental_rayleigh import RAYLEIGH_MOLECULES
 
@@ -1031,6 +1038,9 @@ class Radtran:
         self.thermal = ThermalSolver()
         self.thermal_result = ThermalResult()
 
+        self.reflected = ReflectedSolver()
+        self.reflected_result = ReflectedResult()
+
         # Runtime settings and default thermal geometry.
         if settings_kwargs is None:
             settings_kwargs = {}
@@ -1048,11 +1058,7 @@ class Radtran:
         "Compute the opacity of the atmosphere."
         self.opacities.compute_opacity(self.atmosphere, ind_wv0, ind_wv1, self.opacities_result)
 
-    def _radiate(self, ind_wv0, ind_wv1, calculation):
-        "Do the radiative transfer."
-
-        if calculation != 'thermal':
-            raise ValueError
+    def _radiate_thermal(self, ind_wv0, ind_wv1):
 
         chunk_width = ind_wv1 - ind_wv0
 
@@ -1078,12 +1084,85 @@ class Radtran:
             self.settings.hard_surface,
             self.thermal_result,
         )
+    
+    def _radiate_reflected(self, ind_wv0, ind_wv1):
+        chunk_width = ind_wv1 - ind_wv0
 
+        # Legacy reflected-light defaults for inputs not yet carried on the new API.
+        single_phase = 0
+        multi_phase = 0
+        frac_a = 0.17
+        frac_b = 0.27
+        frac_c = 1.3
+        constant_back = 0.29
+        constant_forward = 0.39
+        toon_coefficients = 0
+        b_top = 0.0
+
+        self.reflected._ensure(self.atmosphere.nlayers)
+        self.reflected_result._ensure(self.opacities.nwavelength)
+
+        get_reflected_1d(
+            self.reflected,
+            self.atmosphere.nlayers,
+            chunk_width,
+            ind_wv0,
+            ind_wv1,
+            self.opacities.nwavelength,
+            self.settings.effective_numg,
+            self.settings.effective_numt,
+            self.settings.gweight,
+            self.settings.tweight,
+            self.opacities_result.wavelength_um[:chunk_width],
+            self.opacities_result.dtau_dedd[:chunk_width, :],
+            self.opacities_result.tau_dedd[:chunk_width, :],
+            self.opacities_result.w0_dedd[:chunk_width, :],
+            self.opacities_result.cosb_dedd[:chunk_width, :],
+            self.opacities_result.gcos2[:chunk_width, :],
+            self.opacities_result.ftau_cld[:chunk_width, :],
+            self.opacities_result.ftau_ray[:chunk_width, :],
+            self.opacities_result.dtau[:chunk_width, :],
+            self.opacities_result.tau[:chunk_width, :],
+            self.opacities_result.w0[:chunk_width, :],
+            self.opacities_result.cosb[:chunk_width, :],
+            self.opacities_result.surf_reflect[:chunk_width],
+            self.settings.ubar0,
+            self.settings.ubar1,
+            self.settings.cos_theta,
+            np.ones(chunk_width, dtype=np.float64),
+            single_phase,
+            multi_phase,
+            frac_a,
+            frac_b,
+            frac_c,
+            constant_back,
+            constant_forward,
+            1,
+            0,
+            toon_coefficients,
+            b_top,
+            self.reflected_result,
+        )
+
+    def _radiate(self, ind_wv0, ind_wv1, calculation):
+        if calculation == 'thermal':
+            self._radiate_thermal(ind_wv0, ind_wv1)
+        elif calculation == 'reflected':
+            self._radiate_reflected(ind_wv0, ind_wv1)
+
+    def _get_result(self, calculation):
+        if calculation == 'thermal':
+            return self.thermal_result
+        elif calculation == 'reflected':
+            return self.reflected_result
+    
     def spectrum(self, atm: Atmosphere, planet: Planet, clouds: Clouds=None, star: Star=None, calculation='thermal'):
 
-        if calculation != 'thermal':
-            raise ValueError()
-        
+        if calculation not in ['thermal', 'reflected']:
+            raise ValueError(
+                f"calculation must be 'thermal' or 'reflected', got {calculation!r}"
+            )
+
         # Setup the atmospheric grid.
         self._setup_atmosphere(atm, planet)
 
@@ -1100,7 +1179,7 @@ class Radtran:
             # Do the RT for the wavelength chunk
             self._radiate(ind_wv0, ind_wv1, calculation)    
 
-        return self.thermal_result
+        return self._get_result(calculation)
 
 def _decode_sqlite_array(cell):
     if isinstance(cell, np.ndarray):

@@ -1,11 +1,12 @@
 # Comment below helps ignore linting false-positives.
 # type: ignore
 
-"""Experimental no-alloc thermal flux solvers.
+"""Experimental no-alloc thermal and reflected flux solvers.
 
 This module mirrors the reflected-light no-alloc pattern in
 ``picaso.fluxes_noalloc`` but only implements the spectrum-mode thermal
-source-function solver and only returns TOA fluxes in the first pass.
+source-function solver and a TOA-only reflected-light solver in the first
+pass.
 """
 
 import numba as nb
@@ -367,3 +368,420 @@ def get_thermal_1d_w(
         sym_fac = 1.0 / (2.0 * np.pi)
 
     return thermal_sum * sym_fac
+
+
+@nb.experimental.jitclass
+class ReflectedWorkspace:
+    """Per-thread scratch space for the TOA-only reflected-light solver."""
+
+    nlayer: nb.int64
+    g1: nb.float64[:]
+    g2: nb.float64[:]
+    lamda: nb.float64[:]
+    gama: nb.float64[:]
+    g3: nb.float64[:]
+    a_minus: nb.float64[:]
+    a_plus: nb.float64[:]
+    c_minus_up: nb.float64[:]
+    c_plus_up: nb.float64[:]
+    c_minus_down: nb.float64[:]
+    c_plus_down: nb.float64[:]
+    exptrm: nb.float64[:]
+    exptrm_positive: nb.float64[:]
+    exptrm_minus: nb.float64[:]
+    p_single: nb.float64[:]
+    A: nb.float64[:]
+    B: nb.float64[:]
+    C: nb.float64[:]
+    D: nb.float64[:]
+    positive: nb.float64[:]
+    negative: nb.float64[:]
+    xint: nb.float64[:]
+
+    def __init__(self, nlayer):
+        self._allocate(nlayer)
+
+    def _allocate(self, nlayer):
+        self.nlayer = nlayer
+        self.g1 = np.empty(nlayer, dtype=np.float64)
+        self.g2 = np.empty(nlayer, dtype=np.float64)
+        self.lamda = np.empty(nlayer, dtype=np.float64)
+        self.gama = np.empty(nlayer, dtype=np.float64)
+        self.g3 = np.empty(nlayer, dtype=np.float64)
+        self.a_minus = np.empty(nlayer, dtype=np.float64)
+        self.a_plus = np.empty(nlayer, dtype=np.float64)
+        self.c_minus_up = np.empty(nlayer, dtype=np.float64)
+        self.c_plus_up = np.empty(nlayer, dtype=np.float64)
+        self.c_minus_down = np.empty(nlayer, dtype=np.float64)
+        self.c_plus_down = np.empty(nlayer, dtype=np.float64)
+        self.exptrm = np.empty(nlayer, dtype=np.float64)
+        self.exptrm_positive = np.empty(nlayer, dtype=np.float64)
+        self.exptrm_minus = np.empty(nlayer, dtype=np.float64)
+        self.p_single = np.empty(nlayer, dtype=np.float64)
+        self.A = np.empty(2 * nlayer, dtype=np.float64)
+        self.B = np.empty(2 * nlayer, dtype=np.float64)
+        self.C = np.empty(2 * nlayer, dtype=np.float64)
+        self.D = np.empty(2 * nlayer, dtype=np.float64)
+        self.positive = np.empty(nlayer, dtype=np.float64)
+        self.negative = np.empty(nlayer, dtype=np.float64)
+        self.xint = np.empty(nlayer + 1, dtype=np.float64)
+
+    def _ensure(self, nlayer):
+        if nlayer != self.nlayer:
+            self._allocate(nlayer)
+
+
+ReflectedWorkspaceType = ReflectedWorkspace.class_type.instance_type
+
+
+@nb.experimental.jitclass
+class ReflectedResult:
+    """Persistent reflected-light solver outputs."""
+
+    nwavelengths: nb.int64
+    wavelength_um: nb.float64[:]
+    albedo: nb.float64[:]
+
+    def __init__(self):
+        self._allocate(0)
+
+    def _allocate(self, nwavelengths):
+        self.nwavelengths = nwavelengths
+        self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.albedo = np.empty(nwavelengths, dtype=np.float64)
+
+    def _ensure(self, nwavelengths):
+        if nwavelengths != self.nwavelengths:
+            self._allocate(nwavelengths)
+
+
+@nb.experimental.jitclass
+class ReflectedSolver:
+    """Persistent reflected-light solver state."""
+
+    nlevel: nb.int64
+    workspace: types.ListType(ReflectedWorkspaceType)
+
+    def __init__(self):
+        self._allocate(0)
+
+    def _allocate(self, nlevel):
+        self.nlevel = nlevel
+        nthreads = nb.get_num_threads()
+        self.workspace = typed.List.empty_list(ReflectedWorkspaceType)
+        if nlevel <= 0:
+            return
+        for _ in range(nthreads):
+            self.workspace.append(ReflectedWorkspace(nlevel - 1))
+
+    def _ensure(self, nlevel):
+        if nlevel != self.nlevel or len(self.workspace) != nb.get_num_threads():
+            self._allocate(nlevel)
+
+
+@nb.njit(parallel=True)
+def get_reflected_1d(
+    self,
+    nlevel,
+    nwavelengths_in_chunk,
+    ind_wv0,
+    ind_wv1,
+    nwavelengths,
+    numg,
+    numt,
+    gweight,
+    tweight,
+    wavelength_um,
+    dtau,
+    tau,
+    w0,
+    cosb,
+    gcos2,
+    ftau_cld,
+    ftau_ray,
+    dtau_og,
+    tau_og,
+    w0_og,
+    cosb_og,
+    surf_reflect,
+    ubar0,
+    ubar1,
+    cos_theta,
+    F0PI,
+    single_phase,
+    multi_phase,
+    frac_a,
+    frac_b,
+    frac_c,
+    constant_back,
+    constant_forward,
+    get_toa_intensity,
+    get_lvl_flux,
+    toon_coefficients,
+    b_top,
+    result,
+):
+    """Compute TOA reflected-light intensity for a single atmosphere."""
+
+    if not get_toa_intensity:
+        raise ValueError("TOA intensity output is required in the current reflected-light solver")
+    if get_lvl_flux:
+        raise ValueError("level-flux output is not implemented in the experimental reflected-light solver")
+
+    self._ensure(nlevel)
+    result._ensure(nwavelengths)
+
+    for iw in nb.prange(nwavelengths_in_chunk):
+        out_iw = ind_wv0 + iw
+        result.wavelength_um[out_iw] = wavelength_um[iw]
+        result.albedo[out_iw] = get_reflected_1d_w(
+            self.workspace[nb.get_thread_id()],
+            nlevel,
+            numg,
+            numt,
+            gweight,
+            tweight,
+            dtau[iw, :],
+            tau[iw, :],
+            w0[iw, :],
+            cosb[iw, :],
+            gcos2[iw, :],
+            ftau_cld[iw, :],
+            ftau_ray[iw, :],
+            dtau_og[iw, :],
+            tau_og[iw, :],
+            w0_og[iw, :],
+            cosb_og[iw, :],
+            surf_reflect[iw],
+            ubar0,
+            ubar1,
+            cos_theta,
+            F0PI[iw],
+            single_phase,
+            multi_phase,
+            frac_a,
+            frac_b,
+            frac_c,
+            constant_back,
+            constant_forward,
+            toon_coefficients,
+            b_top,
+        )
+
+@nb.njit(cache=True)
+def get_reflected_1d_w(
+    wrk,
+    nlevel,
+    numg,
+    numt,
+    gweight,
+    tweight,
+    dtau,
+    tau,
+    w0,
+    cosb,
+    gcos2,
+    ftau_cld,
+    ftau_ray,
+    dtau_og,
+    tau_og,
+    w0_og,
+    cosb_og,
+    surf_reflect,
+    ubar0,
+    ubar1,
+    cos_theta,
+    F0PI,
+    single_phase,
+    multi_phase,
+    frac_a,
+    frac_b,
+    frac_c,
+    constant_back,
+    constant_forward,
+    toon_coefficients,
+    b_top,
+):
+    """Per-wavelength TOA reflected-light solve used by :func:`get_reflected_1d`."""
+
+    nlayer = nlevel - 1
+    sq3 = np.sqrt(3.0)
+
+    g1 = wrk.g1
+    g2 = wrk.g2
+    lamda = wrk.lamda
+    gama = wrk.gama
+    g3 = wrk.g3
+    a_minus = wrk.a_minus
+    a_plus = wrk.a_plus
+    c_minus_up = wrk.c_minus_up
+    c_plus_up = wrk.c_plus_up
+    c_minus_down = wrk.c_minus_down
+    c_plus_down = wrk.c_plus_down
+    exptrm = wrk.exptrm
+    exptrm_positive = wrk.exptrm_positive
+    exptrm_minus = wrk.exptrm_minus
+    p_single = wrk.p_single
+    A = wrk.A
+    B = wrk.B
+    C = wrk.C
+    D = wrk.D
+    positive = wrk.positive
+    negative = wrk.negative
+    xint = wrk.xint
+
+    f0pi_w = F0PI
+    surf_reflect_w = surf_reflect
+    albedo_sum = 0.0
+
+    if toon_coefficients == 1:
+        for i in range(nlayer):
+            w0_iw = w0[i]
+            ft_iw = ftau_cld[i]
+            cb_iw = cosb[i]
+            g1[i] = (7.0 - w0_iw * (4.0 + 3.0 * ft_iw * cb_iw)) / 4.0
+            g2[i] = -(1.0 - w0_iw * (4.0 - 3.0 * ft_iw * cb_iw)) / 4.0
+    elif toon_coefficients == 0:
+        for i in range(nlayer):
+            w0_iw = w0[i]
+            ft_iw = ftau_cld[i]
+            cb_iw = cosb[i]
+            g1[i] = (sq3 * 0.5) * (2.0 - w0_iw * (1.0 + ft_iw * cb_iw))
+            g2[i] = (sq3 * w0_iw * 0.5) * (1.0 - ft_iw * cb_iw)
+
+    for i in range(nlayer):
+        lamda_i = np.sqrt(g1[i] * g1[i] - g2[i] * g2[i])
+        lamda[i] = lamda_i
+        gama[i] = (g1[i] - lamda_i) / g2[i]
+
+        exptrm_val = lamda[i] * dtau[i]
+        if exptrm_val > 35.0:
+            exptrm_val = 35.0
+        exptrm[i] = exptrm_val
+        exptrm_positive[i] = np.exp(exptrm_val)
+        exptrm_minus[i] = 1.0 / exptrm_positive[i]
+
+    for i in range(nlayer):
+        g_forward = 0.0
+        g_back = 0.0
+        f = 0.0
+        if single_phase != 1:
+            g_forward = constant_forward * cosb_og[i]
+            g_back = constant_back * cosb_og[i]
+            f = frac_a + frac_b * g_back ** frac_c
+
+        if single_phase == 0:
+            HG_forward = (1.0 - g_forward * g_forward) / np.sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) ** 3)
+            HG_backward = (1.0 - g_back * g_back) / np.sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) ** 3)
+            p_single[i] = f * HG_forward + (1.0 - f) * HG_backward + gcos2[i]
+        elif single_phase == 1:
+            cb = cosb_og[i]
+            p_single[i] = (1.0 - cb * cb) / np.sqrt((1.0 + cb * cb + 2.0 * cb * cos_theta) ** 3)
+        elif single_phase == 2:
+            HG_forward = (1.0 - g_forward * g_forward) / np.sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) ** 3)
+            HG_backward = (1.0 - g_back * g_back) / np.sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) ** 3)
+            p_single[i] = f * HG_forward + (1.0 - f) * HG_backward
+        elif single_phase == 3:
+            HG_forward = (1.0 - g_forward * g_forward) / np.sqrt((1.0 + g_forward * g_forward + 2.0 * g_forward * cos_theta) ** 3)
+            HG_back = (1.0 - g_back * g_back) / np.sqrt((1.0 + g_back * g_back + 2.0 * g_back * cos_theta) ** 3)
+            p_single[i] = ftau_cld[i] * (f * HG_forward + (1.0 - f) * HG_back) + ftau_ray[i] * (0.75 * (1.0 + cos_theta * cos_theta))
+
+    for nt in range(numt):
+        for ng in range(numg):
+            u1 = ubar1[ng, nt]
+            u0 = ubar0[ng, nt]
+            inv_u0 = 1.0 / u0
+            inv_u0_sq = inv_u0 * inv_u0
+            inv_u1 = 1.0 / u1
+            sum_u = u0 + u1
+            inv_sum_u = 1.0 / sum_u
+            inv_u0u1 = inv_u0 * inv_u1
+
+            if toon_coefficients == 1:
+                for i in range(nlayer):
+                    g3[i] = (2.0 - 3.0 * ftau_cld[i] * cosb[i] * u0) / 4.0
+            elif toon_coefficients == 0:
+                for i in range(nlayer):
+                    g3[i] = 0.5 * (1.0 - sq3 * ftau_cld[i] * cosb[i] * u0)
+
+            for i in range(nlayer):
+                g4 = 1.0 - g3[i]
+                denom = lamda[i] * lamda[i] - inv_u0_sq
+                w0_iw = w0[i]
+                a_minus[i] = f0pi_w * w0_iw * (g4 * (g1[i] + inv_u0) + g2[i] * g3[i]) / denom
+                a_plus[i] = f0pi_w * w0_iw * (g3[i] * (g1[i] - inv_u0) + g2[i] * g4) / denom
+
+                exp_up = np.exp(-tau[i] / u0)
+                exp_down = np.exp(-tau[i + 1] / u0)
+                c_minus_up[i] = a_minus[i] * exp_up
+                c_plus_up[i] = a_plus[i] * exp_up
+                c_minus_down[i] = a_minus[i] * exp_down
+                c_plus_down[i] = a_plus[i] * exp_down
+
+            b_surface = surf_reflect_w * u0 * f0pi_w * np.exp(-tau[nlevel - 1] * inv_u0)
+            setup_tri_diag_inplace(
+                A,
+                B,
+                C,
+                D,
+                nlayer,
+                c_plus_up,
+                c_minus_up,
+                c_plus_down,
+                c_minus_down,
+                b_top,
+                b_surface,
+                surf_reflect_w,
+                gama,
+                exptrm_positive,
+                exptrm_minus,
+            )
+            tri_diag_solve_inplace(2 * nlayer, A, B, C, D)
+
+            for i in range(nlayer):
+                positive[i] = D[2 * i] + D[2 * i + 1]
+                negative[i] = D[2 * i] - D[2 * i + 1]
+
+            flux_zero = (
+                positive[nlayer - 1] * exptrm_positive[nlayer - 1]
+                + gama[nlayer - 1] * negative[nlayer - 1] * exptrm_minus[nlayer - 1]
+                + c_plus_down[nlayer - 1]
+            )
+            xint[nlayer] = flux_zero / np.pi
+
+            for i in range(nlayer - 1, -1, -1):
+                if multi_phase == 0:
+                    ubar2 = 0.767
+                    phase_term = 3.0 * ubar2 * ubar2 * u1 * u1 - 1.0
+                    multi_plus = 1.0 + 1.5 * ftau_cld[i] * cosb[i] * u1 + gcos2[i] * phase_term / 2.0
+                    multi_minus = 1.0 - 1.5 * ftau_cld[i] * cosb[i] * u1 + gcos2[i] * phase_term / 2.0
+                elif multi_phase == 1:
+                    multi_plus = 1.0 + 1.5 * ftau_cld[i] * cosb[i] * u1
+                    multi_minus = 1.0 - 1.5 * ftau_cld[i] * cosb[i] * u1
+                else:
+                    raise ValueError("multi_phase must be 0 or 1")
+
+                G = positive[i] * (multi_plus + gama[i] * multi_minus) * w0[i] * 0.5 / np.pi
+                H = negative[i] * (gama[i] * multi_plus + multi_minus) * w0[i] * 0.5 / np.pi
+                source_A = (multi_plus * c_plus_up[i] + multi_minus * c_minus_up[i]) * w0[i] * 0.5 / np.pi
+
+                xint[i] = (
+                    xint[i + 1] * np.exp(-dtau[i] * inv_u1)
+                    + (w0_og[i] * (f0pi_w * 0.25 / np.pi))
+                    * p_single[i]
+                    * np.exp(-tau_og[i] * inv_u0)
+                    * (1.0 - np.exp(-dtau_og[i] * sum_u * inv_u0u1))
+                    * (u0 * inv_sum_u)
+                    + source_A * (1.0 - np.exp(-dtau[i] * sum_u * inv_u0u1))
+                    * (u0 * inv_sum_u)
+                    + G * (np.exp(exptrm[i] - dtau[i] * inv_u1) - 1.0) / (lamda[i] * u1 - 1.0)
+                    + H * (1.0 - np.exp(-(exptrm[i] + dtau[i] * inv_u1))) / (lamda[i] * u1 + 1.0)
+                )
+            albedo_sum += xint[0] * gweight[ng] * tweight[nt]
+
+    if numt == 1:
+        sym_fac = 2.0 * np.pi
+    else:
+        sym_fac = 1.0
+
+    return sym_fac * 0.5 * albedo_sum / F0PI * (cos_theta + 1.0)
