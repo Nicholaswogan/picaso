@@ -515,7 +515,7 @@ class RadtranOpacities:
         storage_code,
         y_min,
         y_max,
-        post_decode_factor,
+        post_decode_log10_factor,
         raw_out,
         out_row,
     ):
@@ -533,8 +533,7 @@ class RadtranOpacities:
                 out_row += y_min
         else:
             out_row[:] = raw_out
-        np.power(10.0, out_row, out=out_row)
-        out_row *= post_decode_factor
+        out_row += post_decode_log10_factor
 
     def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
@@ -573,7 +572,7 @@ class RadtranOpacities:
                     storage_code,
                     self.molecular_y_min[i_molecular],
                     self.molecular_y_max[i_molecular],
-                    1.0,
+                    0.0,
                     molecular_raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
@@ -618,7 +617,7 @@ class RadtranOpacities:
                     storage_code,
                     self.continuum_y_min[i_continuum],
                     self.continuum_y_max[i_continuum],
-                    CIA_AMAGAT_TO_MOLECULE_CM,
+                    np.log10(CIA_AMAGAT_TO_MOLECULE_CM),
                     continuum_raw_buffer[:chunk_width],
                     block[row_id, :chunk_width],
                 )
@@ -778,15 +777,13 @@ def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_in
         c11 = pw * tw
 
         for iw in range(nwavelengths):
-            tau_out[iw, i] += (
-                (
-                    c00 * block[i00, iw]
-                    + c10 * block[i10, iw]
-                    + c01 * block[i01, iw]
-                    + c11 * block[i11, iw]
-                )
-                * column
+            log_opacity = (
+                c00 * block[i00, iw]
+                + c10 * block[i10, iw]
+                + c01 * block[i01, iw]
+                + c11 * block[i11, iw]
             )
+            tau_out[iw, i] += (10.0 ** log_opacity) * column
 
 
 @nb.njit
@@ -802,7 +799,8 @@ def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, ta
         c0 = 1.0 - tw
         c1 = tw
         for iw in range(nwavelengths):
-            tau_out[iw, i] += (c0 * block[it0, iw] + c1 * block[it1, iw]) * scale
+            log_opacity = c0 * block[it0, iw] + c1 * block[it1, iw]
+            tau_out[iw, i] += (10.0 ** log_opacity) * scale
 
 
 @nb.njit
