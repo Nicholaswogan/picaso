@@ -213,6 +213,65 @@ class Atmosphere:
         )
 
         self._atm = atm
+
+
+@nb.experimental.jitclass
+class Clouds:
+    
+    nwavelengths: nb.int64
+    nlayers: nb.int64
+    wavelength: nb.float64[:]
+    pressure: nb.float64[:]
+    opd: nb.float64[:,:]
+    w0: nb.float64[:,:]
+    g0: nb.float64[:,:]
+
+    def __init__(self, wavelength, pressure, opd, w0, g0):
+        
+        # Check shape
+        nwavelengths = len(wavelength)
+        nlayers = len(pressure)
+        if opd.shape[0] != nwavelengths or opd.shape[1] != nlayers:
+            raise ValueError(
+                "opd shape must be (nwavelengths, nlayers), got "
+                f"{opd.shape} for nwavelengths={nwavelengths}, nlayers={nlayers}"
+            )
+        if w0.shape[0] != nwavelengths or w0.shape[1] != nlayers:
+            raise ValueError(
+                "w0 shape must be (nwavelengths, nlayers), got "
+                f"{w0.shape} for nwavelengths={nwavelengths}, nlayers={nlayers}"
+            )
+        if g0.shape[0] != nwavelengths or g0.shape[1] != nlayers:
+            raise ValueError(
+                "g0 shape must be (nwavelengths, nlayers), got "
+                f"{g0.shape} for nwavelengths={nwavelengths}, nlayers={nlayers}"
+            )
+
+        # Check physical
+        for i in range(nwavelengths):
+            for j in range(nlayers):
+                if opd[i,j] < 0.0:
+                    raise ValueError(f"opd must be nonnegative, got opd[{i},{j}]={opd[i, j]}")
+                if w0[i,j] < 0.0 or w0[i,j] > 1.0:
+                    raise ValueError(f"w0 must lie in [0, 1], got w0[{i},{j}]={w0[i, j]}")
+                if g0[i,j] < -1.0 or g0[i,j] > 1.0:
+                    raise ValueError(f"g0 must lie in [-1, 1], got g0[{i},{j}]={g0[i, j]}")
+        # Assume wavelength and pressure are OK.
+        # They are checked later.
+
+        # Set values
+        self.nwavelengths = nwavelengths
+        self.nlayers = nlayers
+        self.wavelength = wavelength
+        self.pressure = pressure
+        self.opd = opd
+        self.w0 = w0
+        self.g0 = g0
+
+
+class Star:
+    pass
+
     
 @nb.experimental.jitclass
 class Planet:
@@ -299,13 +358,6 @@ class RadtranSettings:
         self._validate()
         self._refresh_geometry()
         return self
-        
-class Clouds:
-    pass
-
-
-class Star:
-    pass
 
 
 @nb.experimental.jitclass
@@ -535,7 +587,7 @@ class RadtranOpacities:
             out_row[:] = raw_out
         out_row += post_decode_log10_factor
 
-    def compute_opacity(self, atmosphere: RadtranAtmosphere, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+    def compute_opacity(self, atmosphere: RadtranAtmosphere, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
@@ -644,9 +696,30 @@ class RadtranOpacities:
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
             _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.columns[i_species], tauray)
 
+        # Clouds
+        taucld = opacities_result.taucld[:chunk_width, :]
+        w0_cld = opacities_result.w0_cld[:chunk_width, :]
+        g0_cld = opacities_result.g0_cld[:chunk_width, :]
+        if clouds is not None:
+            taucld[:,:] = clouds.opd[ind_wv0:ind_wv1,:]
+            w0_cld[:,:] = clouds.w0[ind_wv0:ind_wv1,:]
+            g0_cld[:,:] = clouds.g0[ind_wv0:ind_wv1,:]
+        else:
+            taucld[:,:] = 0.0
+            w0_cld[:,:] = 0.0
+            g0_cld[:,:] = 0.0
+
+        # All of these will ultimately be inputs
+        do_holes = True
+        stream = 2.0
+        delta_eddington = True
+        fthin_cld = 1.0
 
         # Finish
-        _finish_compute_opacity(opacities_result, chunk_width)
+        if not do_holes:
+            # We are in the completely cloudy portion
+            fthin_cld = 1.0
+        _finish_compute_opacity(opacities_result, chunk_width, stream, fthin_cld, delta_eddington)
 
 
     def close(self) -> None:
@@ -656,13 +729,6 @@ class RadtranOpacities:
             self._header = None
             self._molecular_group = None
             self._continuum_group = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-        return False
 
     def __del__(self):
         try:
@@ -814,9 +880,7 @@ def _accumulate_rayleigh_tau(sigma_row, columns_row, tau_out):
             tau_out[iw, i] += sigma * (columns_row[i] / AVOGADRO)
 
 @nb.njit
-def _finish_compute_opacity(result, chunk_width):
-
-    stream = 2.0
+def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream, fthin_cld, delta_eddington):
     
     for iw in range(chunk_width):
         running_tau = 0.0
@@ -825,29 +889,74 @@ def _finish_compute_opacity(result, chunk_width):
         result.tau_dedd[iw, 0] = 0.0
 
         for i in range(result.nlayers):
+            # Unpack to scalars
+            taugas = result.taugas[iw,i]
             tauray = result.tauray[iw,i]
-            dtau = result.taugas[iw,i] + tauray
-            result.dtau[iw,i] = dtau
-            running_tau += dtau
-            result.tau[iw, i+1] = running_tau
+            taucld = result.taucld[iw,i]
+            w0_cld = result.w0_cld[iw,i]
+            g0_cld = result.g0_cld[iw,i]
+            raman_factor = 1.0 # temporary for now
+
+            # Apply thinning to cloud
+            taucld *= fthin_cld
+            g0_cld *= fthin_cld
+
+            # Total opacity
+            dtau = taugas + tauray + taucld
+
+            tauscat_cld = w0_cld*taucld
+            tauscat = tauscat_cld + tauray
+            if tauscat > 0.0:
+                # Fraction of total scattering due to clouds.
+                ftau_cld = tauscat_cld/tauscat
+                # Fraction of total scattering due to Rayleigh.
+                ftau_ray = tauray/tauscat
+                # Hansen & Travis 1974 for Rayleigh scattering 
+                gcos2 = 0.5 * ftau_ray
+            else:
+                ftau_cld = 0.0
+                ftau_ray = 0.0
+                gcos2 = 0.0
+
+            # Asymmetry
+            cosb = g0_cld
+
+            # Single scattering albedo
             if dtau > 0:
-                w0 = np.minimum(np.maximum(tauray/dtau, 1.0e-8), 1.0 - 1.0e-8)
+                w0 = (tauray*raman_factor + taucld*w0_cld)/dtau
+                w0 = np.minimum(np.maximum(w0, 1.0e-8), 1.0 - 1.0e-8)
+
+                w0_no_raman = (tauray*0.99999 + taucld*w0_cld)/dtau
+                w0_no_raman = np.minimum(np.maximum(w0_no_raman, 1.0e-8), 1.0 - 1.0e-8)
             else:
                 w0 = 1.0e-8
-            result.w0[iw,i] = w0
+                w0_no_raman = 1.0e-8
 
-            cosb = 0.0
+            # Cumulative total opacity
+            running_tau += dtau
+
+            # Delta eddington
+            if delta_eddington:
+                f_deltaM = cosb**stream
+                w0_dedd = w0*(1.0 - f_deltaM)/(1.0 - w0*f_deltaM)
+                cosb_dedd = (cosb - f_deltaM)/(1.0 - f_deltaM)
+                dtau_dedd = dtau*(1.0 - w0*f_deltaM)
+                running_tau_dedd += dtau_dedd
+            else:
+                w0_dedd = w0
+                cosb_dedd = cosb
+                dtau_dedd = dtau
+                running_tau_dedd += dtau_dedd
+
+            # Save results
+            result.dtau[iw,i] = dtau
+            result.ftau_cld[iw,i] = ftau_cld
+            result.ftau_ray[iw,i] = ftau_ray
+            result.gcos2[iw,i] = gcos2
             result.cosb[iw,i] = cosb
-            result.ftau_cld[iw,i] = 0.0
-            result.ftau_ray[iw,i] = 1.0
-            result.gcos2[iw,i] = 0.5 * result.ftau_ray[iw,i]
-
-            # Now delta eddington
-            f_deltaM = cosb**stream
-            w0_dedd = w0*(1.0 - f_deltaM)/(1.0 - w0*f_deltaM)
-            cosb_dedd = (cosb - f_deltaM)/(1.0 - f_deltaM)
-            dtau_dedd = dtau*(1.0 - w0*f_deltaM)
-            running_tau_dedd += dtau_dedd
+            result.w0[iw,i] = w0
+            result.w0_no_raman[iw,i] = w0_no_raman
+            result.tau[iw,i+1] = running_tau
             result.w0_dedd[iw,i] = w0_dedd
             result.cosb_dedd[iw,i] = cosb_dedd
             result.dtau_dedd[iw,i] = dtau_dedd
@@ -864,6 +973,9 @@ class RadtranOpacitiesResult:
     surf_reflect : nb.float64[:]
     taugas : nb.float64[:,:]
     tauray : nb.float64[:,:]
+    taucld : nb.float64[:,:]
+    w0_cld : nb.float64[:,:]
+    g0_cld : nb.float64[:,:]
 
     dtau_dedd : nb.float64[:,:]
     tau_dedd : nb.float64[:,:]
@@ -877,6 +989,7 @@ class RadtranOpacitiesResult:
     dtau : nb.float64[:,:]
     tau : nb.float64[:,:]
     w0 : nb.float64[:,:]
+    w0_no_raman : nb.float64[:,:]
     cosb : nb.float64[:,:]
 
     def __init__(self):
@@ -890,6 +1003,9 @@ class RadtranOpacitiesResult:
         self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
         self.taugas = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.tauray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.taucld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.w0_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.g0_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
         self.dtau_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.tau_dedd = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
@@ -903,6 +1019,7 @@ class RadtranOpacitiesResult:
         self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.tau = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.w0_no_raman = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
     def _ensure(self, nlayers, nwavelengths_per_chunk):
@@ -1042,6 +1159,31 @@ class RadtranAtmosphere:
             self._allocate(nlayers, nspecies)
 
 
+@nb.njit
+def _validate_clouds(clouds: Clouds, pressures, wavelength):
+
+    if clouds.nwavelengths != len(wavelength):
+        raise ValueError(
+            f"clouds.nwavelengths must match len(wavelength), got {clouds.nwavelengths} and {len(wavelength)}"
+        )
+    if clouds.nlayers != len(pressures):
+        raise ValueError(
+            f"clouds.nlayers must match len(pressures), got {clouds.nlayers} and {len(pressures)}"
+        )
+    for i in range(clouds.nwavelengths):
+        if not np.isclose(clouds.wavelength[i], wavelength[i]):
+            raise ValueError(
+                f"cloud wavelength grid must match opacity wavelength grid at index {i}, "
+                f"got {clouds.wavelength[i]} and {wavelength[i]}"
+            )
+    for i in range(clouds.nlayers):
+        if not np.isclose(clouds.pressure[i], pressures[i]):
+            raise ValueError(
+                f"cloud pressure grid must match atmosphere pressures at index {i}, "
+                f"got {clouds.pressure[i]} and {pressures[i]}"
+            )
+
+
 class Radtran:
     "Radiative-transfer driver."
 
@@ -1068,6 +1210,7 @@ class Radtran:
 
         # Atmosphere
         self.atmosphere = RadtranAtmosphere()
+        self.clouds = None
 
         # Solvers
         self.thermal = ThermalSolver()
@@ -1085,13 +1228,23 @@ class Radtran:
         "Setup atmospheric grid."
         self.atmosphere.setup(atm._atm, planet)
 
+    def _setup_clouds(self, clouds: Clouds):
+        "Validate then set cloud properties"
+
+        if clouds is None:
+            self.clouds = None
+            return
+
+        _validate_clouds(clouds, self.atmosphere.pressures, self.opacities.wavelength)
+        self.clouds = clouds
+
     def _prepare_interpolation(self):
         "Prepared interpolation for computing opacities"
         self.opacities.prepare_interpolation(self.atmosphere, self.nwavelengths_per_chunk)
 
     def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
-        self.opacities.compute_opacity(self.atmosphere, ind_wv0, ind_wv1, self.opacities_result)
+        self.opacities.compute_opacity(self.atmosphere, self.clouds, ind_wv0, ind_wv1, self.opacities_result)
 
     def _radiate_thermal(self, ind_wv0, ind_wv1):
 
@@ -1205,6 +1358,9 @@ class Radtran:
 
         # Setup the atmospheric grid.
         self._setup_atmosphere(atm, planet)
+
+        # Setup clouds
+        self._setup_clouds(clouds)
 
         # Prepare interpolation
         self._prepare_interpolation()
