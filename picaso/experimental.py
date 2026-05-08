@@ -308,6 +308,16 @@ class Planet:
 @dataclass
 class RadtranSettings:
     hard_surface: bool = False
+    single_phase: int = 0
+    multi_phase: int = 0
+    frac_a: float = 0.17
+    frac_b: float = 0.27
+    frac_c: float = 1.3
+    constant_back: float = 0.29
+    constant_forward: float = 0.39
+    toon_coefficients: int = 0
+    stream: float = 2.0
+    delta_eddington: bool = True
 
 @dataclass
 class RadtranPhase:
@@ -600,7 +610,7 @@ class RadtranOpacities:
             out_row[:] = raw_out
         out_row += post_decode_log10_factor
 
-    def compute_opacity(self, atmosphere: RadtranAtmosphere, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+    def compute_opacity(self, atmosphere: RadtranAtmosphere, settings: RadtranSettings, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
@@ -723,20 +733,16 @@ class RadtranOpacities:
             g0_cld[:,:] = 0.0
 
         # All of these will ultimately be inputs
-        stream = 2.0
-        delta_eddington = True
-        _finish_compute_opacity(opacities_result, chunk_width, stream, delta_eddington, fthin_cld=1.0)
+        _finish_compute_opacity(opacities_result, chunk_width, settings.stream, settings.delta_eddington, fthin_cld=1.0)
     
-    def adjust_opacity_for_clearsky(self, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+    def adjust_opacity_for_clearsky(self, clouds: Clouds, settings: RadtranSettings, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         
         if clouds is None or not clouds.do_holes:
             raise ValueError("adjust_opacity_for_clearsky requires a cloud object with do_holes=True")
         
         chunk_width = ind_wv1 - ind_wv0
 
-        stream = 2.0
-        delta_eddington = True
-        _finish_compute_opacity(opacities_result, chunk_width, stream, delta_eddington, clouds.fthin_cld)
+        _finish_compute_opacity(opacities_result, chunk_width, settings.stream, settings.delta_eddington, clouds.fthin_cld)
 
     def close(self) -> None:
         if getattr(self, "file", None) is not None:
@@ -1270,11 +1276,11 @@ class Radtran:
 
     def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
-        self.opacities.compute_opacity(self.atmosphere, self.clouds, ind_wv0, ind_wv1, self.opacities_result)
+        self.opacities.compute_opacity(self.atmosphere, self.settings, self.clouds, ind_wv0, ind_wv1, self.opacities_result)
 
     def _adjust_opacity_for_clearsky(self, ind_wv0, ind_wv1):
         "Adjust opacity for clear-sky portin of atmosphere"
-        self.opacities.adjust_opacity_for_clearsky(self.clouds, ind_wv0, ind_wv1, self.opacities_result)
+        self.opacities.adjust_opacity_for_clearsky(self.clouds, self.settings, ind_wv0, ind_wv1, self.opacities_result)
 
     def _radiate_thermal(self, ind_wv0, ind_wv1, scale_factor):
 
@@ -1315,17 +1321,8 @@ class Radtran:
             )
         
         chunk_width = ind_wv1 - ind_wv0
-        # Legacy reflected-light defaults for inputs not yet carried on the new API.
-        single_phase = 0
-        multi_phase = 0
-        frac_a = 0.17
-        frac_b = 0.27
-        frac_c = 1.3
-        constant_back = 0.29
-        constant_forward = 0.39
-        toon_coefficients = 0
-        b_top = 0.0
 
+        # RT
         get_reflected_1d(
             self.reflected,
             self.atmosphere.nlayers,
@@ -1349,17 +1346,17 @@ class Radtran:
             self.phase.ubar0,
             self.phase.ubar1,
             self.phase.cos_theta,
-            single_phase,
-            multi_phase,
-            frac_a,
-            frac_b,
-            frac_c,
-            constant_back,
-            constant_forward,
+            self.settings.single_phase,
+            self.settings.multi_phase,
+            self.settings.frac_a,
+            self.settings.frac_b,
+            self.settings.frac_c,
+            self.settings.constant_back,
+            self.settings.constant_forward,
             1,
             0,
-            toon_coefficients,
-            b_top,
+            self.settings.toon_coefficients,
+            0.0,
             self.opacities_result.spectrum[:chunk_width],
         )
 
@@ -1409,7 +1406,7 @@ class Radtran:
         # Setup clouds
         self._setup_clouds(clouds)
 
-        # Deter
+        # Determine some scale factors for patchy clouds, if needed
         if self.clouds is not None and self.clouds.do_holes:
             scale_factor_cloudy = 1.0 - self.clouds.fhole
             scale_factor_clear = self.clouds.fhole
@@ -1443,6 +1440,7 @@ class Radtran:
                 # Do RT for clear-sky portion
                 self._radiate(ind_wv0, ind_wv1, calculation, scale_factor_clear)
 
+        # Do any needed post-processing
         self._post_process(calculation)
 
         return self._get_result(calculation)
