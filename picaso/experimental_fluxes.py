@@ -158,9 +158,6 @@ def get_thermal_1d(
     self,
     nlevel,
     nwavelengths_in_chunk,
-    ind_wv0,
-    ind_wv1,
-    nwavelengths,
     numg,
     numt,
     gweight,
@@ -174,7 +171,7 @@ def get_thermal_1d(
     ubar1,
     surf_reflect,
     hard_surface,
-    result,
+    flux,
 ):
     """Compute TOA thermal fluxes for a single atmosphere.
 
@@ -186,12 +183,9 @@ def get_thermal_1d(
     """
 
     self._ensure(nlevel)
-    result._ensure(nwavelengths)
 
     for iw in nb.prange(nwavelengths_in_chunk):
-        out_iw = ind_wv0 + iw
-        result.wavelength_um[out_iw] = wavelength_um[iw]
-        result.thermal[out_iw] = get_thermal_1d_w(
+        flux[iw] = get_thermal_1d_w(
             self.workspace[nb.get_thread_id()],
             nlevel,
             numg,
@@ -208,9 +202,6 @@ def get_thermal_1d(
             surf_reflect[iw],
             hard_surface,
         )
-
-    return result
-
 
 @nb.njit
 def get_thermal_1d_w(
@@ -486,14 +477,10 @@ def get_reflected_1d(
     self,
     nlevel,
     nwavelengths_in_chunk,
-    ind_wv0,
-    ind_wv1,
-    nwavelengths,
     numg,
     numt,
     gweight,
     tweight,
-    wavelength_um,
     dtau,
     tau,
     w0,
@@ -509,7 +496,6 @@ def get_reflected_1d(
     ubar0,
     ubar1,
     cos_theta,
-    F0PI,
     single_phase,
     multi_phase,
     frac_a,
@@ -521,7 +507,7 @@ def get_reflected_1d(
     get_lvl_flux,
     toon_coefficients,
     b_top,
-    result,
+    albedo,
 ):
     """Compute TOA reflected-light intensity for a single atmosphere."""
 
@@ -531,12 +517,9 @@ def get_reflected_1d(
         raise ValueError("level-flux output is not implemented in the experimental reflected-light solver")
 
     self._ensure(nlevel)
-    result._ensure(nwavelengths)
 
     for iw in nb.prange(nwavelengths_in_chunk):
-        out_iw = ind_wv0 + iw
-        result.wavelength_um[out_iw] = wavelength_um[iw]
-        result.albedo[out_iw] = get_reflected_1d_w(
+        albedo[iw] = get_reflected_1d_w(
             self.workspace[nb.get_thread_id()],
             nlevel,
             numg,
@@ -558,7 +541,7 @@ def get_reflected_1d(
             ubar0,
             ubar1,
             cos_theta,
-            F0PI[iw],
+            1.0,
             single_phase,
             multi_phase,
             frac_a,

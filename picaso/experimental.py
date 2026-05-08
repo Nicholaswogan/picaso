@@ -228,8 +228,9 @@ class Clouds:
 
     do_holes: nb.bool
     fthin_cld: nb.float64
+    fhole: nb.float64
 
-    def __init__(self, wavelength, pressure, opd, w0, g0, do_holes=False, fthin_cld=1.0):
+    def __init__(self, wavelength, pressure, opd, w0, g0, do_holes=False, fthin_cld=1.0, fhole=0.0):
         
         # Check shape
         nwavelengths = len(wavelength)
@@ -261,6 +262,8 @@ class Clouds:
                     raise ValueError(f"g0 must lie in [-1, 1], got g0[{i},{j}]={g0[i, j]}")
         if fthin_cld < 0.0 or fthin_cld > 1.0:
             raise ValueError(f"fthin_cld must lie in [0, 1], got {fthin_cld}")
+        if fhole < 0.0 or fhole > 1.0:
+            raise ValueError(f"fhole must lie in [0, 1], got {fhole}")
         
         # Assume wavelength and pressure are OK.
         # They are checked later.
@@ -276,7 +279,7 @@ class Clouds:
 
         self.do_holes = do_holes
         self.fthin_cld = fthin_cld
-
+        self.fhole = fhole
 
 class Star:
     pass
@@ -1005,6 +1008,8 @@ class RadtranOpacitiesResult:
     w0_no_raman : nb.float64[:,:]
     cosb : nb.float64[:,:]
 
+    spectrum : nb.float64[:]
+
     def __init__(self):
         self._allocate(0, 0)
 
@@ -1034,6 +1039,8 @@ class RadtranOpacitiesResult:
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.w0_no_raman = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+
+        self.spectrum = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
     def _ensure(self, nlayers, nwavelengths_per_chunk):
         if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
@@ -1269,17 +1276,15 @@ class Radtran:
         "Adjust opacity for clear-sky portin of atmosphere"
         self.opacities.adjust_opacity_for_clearsky(self.clouds, ind_wv0, ind_wv1, self.opacities_result)
 
-    def _radiate_thermal(self, ind_wv0, ind_wv1):
+    def _radiate_thermal(self, ind_wv0, ind_wv1, scale_factor):
 
         chunk_width = ind_wv1 - ind_wv0
 
+        # RT
         get_thermal_1d(
             self.thermal,
             self.atmosphere.nlayers,
             chunk_width,
-            ind_wv0,
-            ind_wv1,
-            self.opacities.nwavelength,
             self.phase.ubar1.shape[0],
             self.phase.ubar1.shape[1],
             self.phase.gweight,
@@ -1293,10 +1298,16 @@ class Radtran:
             self.phase.ubar1,
             self.opacities_result.surf_reflect[:chunk_width],
             self.settings.hard_surface,
-            self.thermal_result,
+            self.opacities_result.spectrum[:chunk_width],
         )
+
+        # Save chunk
+        self.thermal_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        spectrum = self.opacities_result.spectrum[:chunk_width]
+        spectrum *= scale_factor
+        self.thermal_result.thermal[ind_wv0:ind_wv1] += spectrum
     
-    def _radiate_reflected(self, ind_wv0, ind_wv1):
+    def _radiate_reflected(self, ind_wv0, ind_wv1, scale_factor):
 
         if not np.isfinite(self.atmosphere.semimajor) or self.atmosphere.semimajor <= 0.0:
             raise ValueError(
@@ -1319,14 +1330,10 @@ class Radtran:
             self.reflected,
             self.atmosphere.nlayers,
             chunk_width,
-            ind_wv0,
-            ind_wv1,
-            self.opacities.nwavelength,
             self.phase.effective_numg,
             self.phase.effective_numt,
             self.phase.gweight,
             self.phase.tweight,
-            self.opacities_result.wavelength_um[:chunk_width],
             self.opacities_result.dtau_dedd[:chunk_width, :],
             self.opacities_result.tau_dedd[:chunk_width, :],
             self.opacities_result.w0_dedd[:chunk_width, :],
@@ -1342,7 +1349,6 @@ class Radtran:
             self.phase.ubar0,
             self.phase.ubar1,
             self.phase.cos_theta,
-            np.ones(chunk_width, dtype=np.float64),
             single_phase,
             multi_phase,
             frac_a,
@@ -1354,18 +1360,36 @@ class Radtran:
             0,
             toon_coefficients,
             b_top,
-            self.reflected_result,
+            self.opacities_result.spectrum[:chunk_width],
         )
 
-        fpfs_scale = (self.atmosphere.radius / self.atmosphere.semimajor) ** 2.0
-        self.reflected_result.fpfs[ind_wv0:ind_wv1] = self.reflected_result.albedo[ind_wv0:ind_wv1] * fpfs_scale
+        # Save chunk
+        self.reflected_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        spectrum = self.opacities_result.spectrum[:chunk_width]
+        spectrum *= scale_factor
+        self.reflected_result.albedo[ind_wv0:ind_wv1] += spectrum
 
-    def _radiate(self, ind_wv0, ind_wv1, calculation):
+    def _zero_result(self, calculation):
         if calculation == 'thermal':
-            self._radiate_thermal(ind_wv0, ind_wv1)
+            self.thermal_result._ensure(self.opacities.nwavelength)
+            self.thermal_result.thermal[:] = 0.0
         elif calculation == 'reflected':
-            self._radiate_reflected(ind_wv0, ind_wv1)
+            self.reflected_result._ensure(self.opacities.nwavelength)
+            self.reflected_result.albedo[:] = 0.0
 
+    def _radiate(self, ind_wv0, ind_wv1, calculation, scale_factor):
+        if calculation == 'thermal':
+            self._radiate_thermal(ind_wv0, ind_wv1, scale_factor)
+        elif calculation == 'reflected':
+            self._radiate_reflected(ind_wv0, ind_wv1, scale_factor)
+
+    def _post_process(self, calculation):
+        if calculation == 'thermal':
+            pass
+        elif calculation == 'reflected':
+            fpfs_scale = (self.atmosphere.radius / self.atmosphere.semimajor) ** 2.0
+            self.reflected_result.fpfs[:] = self.reflected_result.albedo[:] * fpfs_scale
+            
     def _get_result(self, calculation):
         if calculation == 'thermal':
             return self.thermal_result
@@ -1385,8 +1409,19 @@ class Radtran:
         # Setup clouds
         self._setup_clouds(clouds)
 
+        # Deter
+        if self.clouds is not None and self.clouds.do_holes:
+            scale_factor_cloudy = 1.0 - self.clouds.fhole
+            scale_factor_clear = self.clouds.fhole
+        else:
+            scale_factor_cloudy = 1.0
+            scale_factor_clear = np.nan
+
         # Prepare interpolation
         self._prepare_interpolation()
+
+        # Allocate and zero-out result
+        self._zero_result(calculation)
 
         # Loop over each wavelength chunk
         for i in range(self.nwavelength_chunks):
@@ -1397,7 +1432,7 @@ class Radtran:
             self._compute_opacity(ind_wv0, ind_wv1)
 
             # Do the RT for the wavelength chunk
-            self._radiate(ind_wv0, ind_wv1, calculation)
+            self._radiate(ind_wv0, ind_wv1, calculation, scale_factor_cloudy)
 
             # If patchy clouds
             if self.clouds is not None and self.clouds.do_holes:
@@ -1406,7 +1441,9 @@ class Radtran:
                 self._adjust_opacity_for_clearsky()
 
                 # Do RT for clear-sky portion
-                self._radiate(ind_wv0, ind_wv1, calculation)
+                self._radiate(ind_wv0, ind_wv1, calculation, scale_factor_clear)
+
+        self._post_process(calculation)
 
         return self._get_result(calculation)
 
