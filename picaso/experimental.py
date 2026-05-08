@@ -226,7 +226,10 @@ class Clouds:
     w0: nb.float64[:,:]
     g0: nb.float64[:,:]
 
-    def __init__(self, wavelength, pressure, opd, w0, g0):
+    do_holes: nb.bool
+    fthin_cld: nb.float64
+
+    def __init__(self, wavelength, pressure, opd, w0, g0, do_holes=False, fthin_cld=1.0):
         
         # Check shape
         nwavelengths = len(wavelength)
@@ -256,6 +259,9 @@ class Clouds:
                     raise ValueError(f"w0 must lie in [0, 1], got w0[{i},{j}]={w0[i, j]}")
                 if g0[i,j] < -1.0 or g0[i,j] > 1.0:
                     raise ValueError(f"g0 must lie in [-1, 1], got g0[{i},{j}]={g0[i, j]}")
+        if fthin_cld < 0.0 or fthin_cld > 1.0:
+            raise ValueError(f"fthin_cld must lie in [0, 1], got {fthin_cld}")
+        
         # Assume wavelength and pressure are OK.
         # They are checked later.
 
@@ -267,6 +273,9 @@ class Clouds:
         self.opd = opd
         self.w0 = w0
         self.g0 = g0
+
+        self.do_holes = do_holes
+        self.fthin_cld = fthin_cld
 
 
 class Star:
@@ -296,10 +305,13 @@ class Planet:
 @dataclass
 class RadtranSettings:
     hard_surface: bool = False
-    numg: int = 1
+
+@dataclass
+class RadtranPhase:
+    numg: int = 10
     numt: int = 1
     phase_angle: float = 0.0
-    effective_numg: int = 1
+    effective_numg: int = 10
     effective_numt: int = 1
 
     gangle: np.ndarray = None
@@ -321,8 +333,6 @@ class RadtranSettings:
             raise ValueError(f"numg must be positive, got {self.numg}")
         if self.numt <= 0:
             raise ValueError(f"numt must be positive, got {self.numt}")
-        if not isinstance(self.hard_surface, bool):
-            raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
         if self.phase_angle < 0.0 or self.phase_angle > 2.0 * np.pi:
             raise ValueError(
                 f"phase_angle must be between 0 and 2*pi radians, got {self.phase_angle}"
@@ -704,18 +714,19 @@ class RadtranOpacities:
             taucld[:,:] = clouds.opd[ind_wv0:ind_wv1,:]
             w0_cld[:,:] = clouds.w0[ind_wv0:ind_wv1,:]
             g0_cld[:,:] = clouds.g0[ind_wv0:ind_wv1,:]
+            do_holes = clouds.do_holes
+            fthin_cld = clouds.fthin_cld
         else:
             taucld[:,:] = 0.0
             w0_cld[:,:] = 0.0
             g0_cld[:,:] = 0.0
+            do_holes = False
+            fthin_cld = 1.0
 
         # All of these will ultimately be inputs
-        do_holes = True
         stream = 2.0
         delta_eddington = True
-        fthin_cld = 1.0
 
-        # Finish
         if not do_holes:
             # We are in the completely cloudy portion
             fthin_cld = 1.0
@@ -1193,6 +1204,7 @@ class Radtran:
         nwavelengths_per_chunk=None,
         wavelength_range=None,
         settings_kwargs=None,
+        phase_kwargs=None,
     ):
 
         # Opacities
@@ -1219,7 +1231,12 @@ class Radtran:
         self.reflected = ReflectedSolver()
         self.reflected_result = ReflectedResult()
 
-        # Runtime settings and default thermal geometry.
+        # Phase
+        if phase_kwargs is None:
+            phase_kwargs = {}
+        self.phase = RadtranPhase(**phase_kwargs)
+
+        # Various settings
         if settings_kwargs is None:
             settings_kwargs = {}
         self.settings = RadtranSettings(**settings_kwargs)
@@ -1257,17 +1274,17 @@ class Radtran:
             ind_wv0,
             ind_wv1,
             self.opacities.nwavelength,
-            self.settings.ubar1.shape[0],
-            self.settings.ubar1.shape[1],
-            self.settings.gweight,
-            self.settings.tweight,
+            self.phase.ubar1.shape[0],
+            self.phase.ubar1.shape[1],
+            self.phase.gweight,
+            self.phase.tweight,
             self.opacities_result.wavelength_um[:chunk_width],
             self.opacities_result.dtau[:chunk_width, :],
             self.opacities_result.w0[:chunk_width, :],
             self.opacities_result.cosb[:chunk_width, :],
             self.atmosphere.temperatures,
             self.atmosphere.pressures,
-            self.settings.ubar1,
+            self.phase.ubar1,
             self.opacities_result.surf_reflect[:chunk_width],
             self.settings.hard_surface,
             self.thermal_result,
@@ -1299,10 +1316,10 @@ class Radtran:
             ind_wv0,
             ind_wv1,
             self.opacities.nwavelength,
-            self.settings.effective_numg,
-            self.settings.effective_numt,
-            self.settings.gweight,
-            self.settings.tweight,
+            self.phase.effective_numg,
+            self.phase.effective_numt,
+            self.phase.gweight,
+            self.phase.tweight,
             self.opacities_result.wavelength_um[:chunk_width],
             self.opacities_result.dtau_dedd[:chunk_width, :],
             self.opacities_result.tau_dedd[:chunk_width, :],
@@ -1316,9 +1333,9 @@ class Radtran:
             self.opacities_result.w0[:chunk_width, :],
             self.opacities_result.cosb[:chunk_width, :],
             self.opacities_result.surf_reflect[:chunk_width],
-            self.settings.ubar0,
-            self.settings.ubar1,
-            self.settings.cos_theta,
+            self.phase.ubar0,
+            self.phase.ubar1,
+            self.phase.cos_theta,
             np.ones(chunk_width, dtype=np.float64),
             single_phase,
             multi_phase,
@@ -1373,7 +1390,7 @@ class Radtran:
             self._compute_opacity(ind_wv0, ind_wv1)
 
             # Do the RT for the wavelength chunk
-            self._radiate(ind_wv0, ind_wv1, calculation)    
+            self._radiate(ind_wv0, ind_wv1, calculation)
 
         return self._get_result(calculation)
 
