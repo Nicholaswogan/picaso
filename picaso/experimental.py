@@ -714,24 +714,26 @@ class RadtranOpacities:
             taucld[:,:] = clouds.opd[ind_wv0:ind_wv1,:]
             w0_cld[:,:] = clouds.w0[ind_wv0:ind_wv1,:]
             g0_cld[:,:] = clouds.g0[ind_wv0:ind_wv1,:]
-            do_holes = clouds.do_holes
-            fthin_cld = clouds.fthin_cld
         else:
             taucld[:,:] = 0.0
             w0_cld[:,:] = 0.0
             g0_cld[:,:] = 0.0
-            do_holes = False
-            fthin_cld = 1.0
 
         # All of these will ultimately be inputs
         stream = 2.0
         delta_eddington = True
+        _finish_compute_opacity(opacities_result, chunk_width, stream, delta_eddington, fthin_cld=1.0)
+    
+    def adjust_opacity_for_clearsky(self, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+        
+        if clouds is None or not clouds.do_holes:
+            raise ValueError("adjust_opacity_for_clearsky requires a cloud object with do_holes=True")
+        
+        chunk_width = ind_wv1 - ind_wv0
 
-        if not do_holes:
-            # We are in the completely cloudy portion
-            fthin_cld = 1.0
-        _finish_compute_opacity(opacities_result, chunk_width, stream, fthin_cld, delta_eddington)
-
+        stream = 2.0
+        delta_eddington = True
+        _finish_compute_opacity(opacities_result, chunk_width, stream, delta_eddington, clouds.fthin_cld)
 
     def close(self) -> None:
         if getattr(self, "file", None) is not None:
@@ -891,7 +893,7 @@ def _accumulate_rayleigh_tau(sigma_row, columns_row, tau_out):
             tau_out[iw, i] += sigma * (columns_row[i] / AVOGADRO)
 
 @nb.njit
-def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream, fthin_cld, delta_eddington):
+def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream, delta_eddington, fthin_cld):
     
     for iw in range(chunk_width):
         running_tau = 0.0
@@ -1263,6 +1265,10 @@ class Radtran:
         "Compute the opacity of the atmosphere."
         self.opacities.compute_opacity(self.atmosphere, self.clouds, ind_wv0, ind_wv1, self.opacities_result)
 
+    def _adjust_opacity_for_clearsky(self, ind_wv0, ind_wv1):
+        "Adjust opacity for clear-sky portin of atmosphere"
+        self.opacities.adjust_opacity_for_clearsky(self.clouds, ind_wv0, ind_wv1, self.opacities_result)
+
     def _radiate_thermal(self, ind_wv0, ind_wv1):
 
         chunk_width = ind_wv1 - ind_wv0
@@ -1382,6 +1388,7 @@ class Radtran:
         # Prepare interpolation
         self._prepare_interpolation()
 
+        # Loop over each wavelength chunk
         for i in range(self.nwavelength_chunks):
             ind_wv0 = i * self.nwavelengths_per_chunk
             ind_wv1 = min(ind_wv0 + self.nwavelengths_per_chunk, self.opacities.nwavelength)
@@ -1391,6 +1398,15 @@ class Radtran:
 
             # Do the RT for the wavelength chunk
             self._radiate(ind_wv0, ind_wv1, calculation)
+
+            # If patchy clouds
+            if self.clouds is not None and self.clouds.do_holes:
+
+                # Adjust opacities for clear-sky portion
+                self._adjust_opacity_for_clearsky()
+
+                # Do RT for clear-sky portion
+                self._radiate(ind_wv0, ind_wv1, calculation)
 
         return self._get_result(calculation)
 
