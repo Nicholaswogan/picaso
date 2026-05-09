@@ -87,40 +87,31 @@ def _call_legacy(case, hard_surface):
 
 
 def _call_experimental(case, hard_surface):
-    ind_wv0 = 1
-    ind_wv1 = 4
-    dtau = case["dtau"][ind_wv0:ind_wv1].copy()
-    w0 = case["w0"][ind_wv0:ind_wv1].copy()
-    cosb = case["cosb"][ind_wv0:ind_wv1].copy()
     _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     solver = experimental_fluxes.ThermalSolver()
-    result = experimental_fluxes.ThermalResult()
-    result._allocate(case["nwno"])
-    result.wavelength_um[:] = np.nan
-    result.thermal[:] = np.nan
+    flux = np.full(case["nwno"], np.nan, dtype=np.float64)
 
-    return experimental_fluxes.get_thermal_1d.py_func(
+    experimental_fluxes.get_thermal_1d.py_func(
         solver,
         case["nlevel"],
-        ind_wv1 - ind_wv0,
-        ind_wv0,
-        ind_wv1,
         case["nwno"],
         case["numg"],
         case["numt"],
         gweight,
         tweight,
-        case["wavelength_um"][ind_wv0:ind_wv1].copy(),
-        dtau,
-        w0,
-        cosb,
+        case["wavelength_um"].copy(),
+        case["dtau"].copy(),
+        case["w0"].copy(),
+        case["cosb"].copy(),
         case["tlevel"].copy(),
         case["plevel"].copy(),
         case["ubar1"].copy(),
-        case["surf_reflect"][ind_wv0:ind_wv1].copy(),
+        case["surf_reflect"].copy(),
         hard_surface,
-        result,
+        flux,
     )
+
+    return flux
 
 
 def _make_reflected_case():
@@ -274,21 +265,16 @@ def _call_experimental_reflected(case):
     ubar0, ubar1, _, _, _ = disco.compute_disco(case["numg"], case["numt"], gangle, tangle, case["phase_angle"])
     _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     solver = experimental_fluxes.ReflectedSolver()
-    result = experimental_fluxes.ReflectedResult()
-    result._allocate(case["nwno"])
+    albedo = np.full(case["nwno"], np.nan, dtype=np.float64)
 
     experimental_fluxes.get_reflected_1d.py_func(
         solver,
         case["nlevel"],
         case["nwno"],
-        0,
-        case["nwno"],
-        case["nwno"],
         case["numg"],
         case["numt"],
         gweight,
         tweight,
-        case["wavelength_um"].copy(),
         dtau,
         tau,
         w0,
@@ -316,9 +302,9 @@ def _call_experimental_reflected(case):
         0,
         case["toon_coefficients"],
         case["b_top"],
-        result,
+        albedo,
     )
-    return result
+    return albedo
 
 
 @pytest.mark.parametrize("hard_surface", [0, 1])
@@ -327,12 +313,8 @@ def test_experimental_thermal_toa_parity(hard_surface):
     expected = _call_legacy(case, hard_surface)
     actual = _call_experimental(case, hard_surface)
 
-    ind_wv0 = 1
-    ind_wv1 = 4
-    assert actual.thermal.shape == (case["nwno"],)
-    np.testing.assert_allclose(actual.thermal[ind_wv0:ind_wv1], expected[ind_wv0:ind_wv1], rtol=1e-12, atol=1e-12)
-    assert np.all(np.isnan(actual.thermal[:ind_wv0]))
-    assert np.all(np.isnan(actual.thermal[ind_wv1:]))
+    assert actual.shape == (case["nwno"],)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
 def test_get_weights_parity():
@@ -378,5 +360,5 @@ def test_experimental_reflected_toa_parity():
     )
     actual = _call_experimental_reflected(case)
 
-    assert actual.albedo.shape == (case["nwno"],)
-    np.testing.assert_allclose(actual.albedo, expected, rtol=1e-12, atol=1e-12)
+    assert actual.shape == (case["nwno"],)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
