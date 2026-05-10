@@ -31,8 +31,8 @@ from .experimental_rayleigh import RAYLEIGH_MOLECULES
 KB_CGS = 1.380649e-16
 AMU_CGS = 1.66053906660e-24
 G_CGS = 6.67430e-8
-M_EARTH_CGS = 5.9722e27
-R_EARTH_CGS = 6.371e8
+M_EARTH_CGS = 5.972167867791379e27
+R_EARTH_CGS = 6.3781e8
 CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
 # Convert number column density to molar column density for legacy Rayleigh parity.
 AVOGADRO = 6.02214076e23
@@ -99,21 +99,25 @@ def get_weights(molecule):
 class Atmosphere_:
 
     nspecies: nb.int64
+    nlevels: nb.int64
     nlayers: nb.int64
 
     species_names: nb.types.ListType(nb.types.unicode_type)
     species_mu: nb.float64[:]
-    pressures: nb.float64[:]
-    temperatures: nb.float64[:]
-    mixing_ratios: nb.float64[:,:]
+    level_pressures: nb.float64[:]
+    level_temperatures: nb.float64[:]
+    level_mixing_ratios: nb.float64[:,:]
+    layer_pressures: nb.float64[:]
+    layer_temperatures: nb.float64[:]
+    layer_mixing_ratios: nb.float64[:,:]
     reference_pressure: nb.float64
 
     def __init__(self, species_names, species_mu, pressures, temperatures, mixing_ratios, reference_pressure):
         
         # Check dimensions
-        nspecies, nlayers = mixing_ratios.shape
-        if nlayers <= 1:
-            raise ValueError("mixing_ratios must have at least two layers")
+        nspecies, nlevels = mixing_ratios.shape
+        if nlevels <= 1:
+            raise ValueError("mixing_ratios must have at least two levels")
         if len(species_names) != nspecies:
             raise ValueError(
                 "species_names length must match mixing_ratios.shape[0] "
@@ -124,15 +128,15 @@ class Atmosphere_:
                 "species_mu length must match mixing_ratios.shape[0] "
                 f"({species_mu.shape[0]} != {nspecies})"
             )
-        if pressures.shape[0] != nlayers:
+        if pressures.shape[0] != nlevels:
             raise ValueError(
                 "pressures length must match mixing_ratios.shape[1] "
-                f"({pressures.shape[0]} != {nlayers})"
+                f"({pressures.shape[0]} != {nlevels})"
             )
-        if temperatures.shape[0] != nlayers:
+        if temperatures.shape[0] != nlevels:
             raise ValueError(
                 "temperatures length must match mixing_ratios.shape[1] "
-                f"({temperatures.shape[0]} != {nlayers})"
+                f"({temperatures.shape[0]} != {nlevels})"
             )
         
         # Check for physical values.
@@ -172,29 +176,23 @@ class Atmosphere_:
                 f"[{pressures[0]}, {pressures[-1]}], got {reference_pressure}"
             )
 
-        # Normalize mixing ratios so they sum to 1 in each layer.
-        for i in range(nlayers):
-            layer_sum = np.sum(mixing_ratios[:, i])
-            if layer_sum <= 0.0:
-                raise ValueError(
-                    "each layer must contain at least one nonzero volume mixing ratio; "
-                    f"empty layer at index {i}"
-                )
-            mixing_ratios[:, i] /= layer_sum
-            
         # Set attributes
         self.nspecies = nspecies
-        self.nlayers = nlayers
+        self.nlevels = nlevels
+        self.nlayers = nlevels - 1
         self.species_names = species_names
         self.species_mu = species_mu
-        self.pressures = pressures
-        self.temperatures = temperatures
-        self.mixing_ratios = mixing_ratios
+        self.level_pressures = pressures
+        self.level_temperatures = temperatures
+        self.level_mixing_ratios = mixing_ratios
+        self.layer_pressures = np.sqrt(pressures[:-1] * pressures[1:])
+        self.layer_temperatures = 0.5 * (temperatures[:-1] + temperatures[1:])
+        self.layer_mixing_ratios = 0.5 * (mixing_ratios[:, :-1] + mixing_ratios[:, 1:])
         self.reference_pressure = reference_pressure
 
 class Atmosphere:
 
-    def __init__(self, species_names, pressures, temperatures, mixing_ratios, species_mu=None, reference_pressure=1.0e-3):
+    def __init__(self, species_names, pressures, temperatures, mixing_ratios, species_mu=None, reference_pressure=1.0):
         # Check inputs.
         if not isinstance(species_names, list):
             raise TypeError(f"species_names must be a list, got {type(species_names)!r}")
@@ -308,13 +306,13 @@ class Planet:
 @dataclass
 class RadtranSettings:
     hard_surface: bool = False
-    single_phase: int = 0
+    single_phase: int = 3
     multi_phase: int = 0
-    frac_a: float = 0.17
-    frac_b: float = 0.27
-    frac_c: float = 1.3
-    constant_back: float = 0.29
-    constant_forward: float = 0.39
+    frac_a: float = 1.0
+    frac_b: float = -1.0
+    frac_c: float = 2.0
+    constant_back: float = -0.5
+    constant_forward: float = 1.0
     toon_coefficients: int = 0
     stream: float = 2.0
     delta_eddington: bool = True
@@ -653,7 +651,7 @@ class RadtranOpacities:
                 )
             _accumulate_molecular_tau(
                 block[:self.workspace.molecular_npairs, :chunk_width],
-                atmosphere.columns[i_species],
+                atmosphere.layer_columns[i_species],
                 self.workspace.molecular_pressure_ind0,
                 self.workspace.molecular_pressure_ind1,
                 self.workspace.molecular_pressure_weight,
@@ -717,7 +715,7 @@ class RadtranOpacities:
                 continue
 
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
-            _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.columns[i_species], tauray)
+            _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
 
         # Clouds
         taucld = opacities_result.taucld[:chunk_width, :]
@@ -811,8 +809,8 @@ def _fill_molecular_interpolation_workspace(atmosphere, pressure_grid, temperatu
         for it in range(workspace.ntemperature):
             workspace.molecular_pair_map[ip, it] = -1
     for i in range(nlayers):
-        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.pressures[i])
-        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
+        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.layer_pressures[i])
+        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.layer_temperatures[i])
 
         workspace.molecular_pressure_ind0[i] = _get_or_create_molecular_pair(ip0, it0, workspace)
         workspace.molecular_pressure_ind1[i] = _get_or_create_molecular_pair(ip1, it0, workspace)
@@ -829,7 +827,7 @@ def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, worksp
     for it in range(workspace.ncontinuum_temperature):
         workspace.continuum_temperature_map[it] = -1
     for i in range(nlayers):
-        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.temperatures[i])
+        it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.layer_temperatures[i])
         workspace.continuum_temperature_ind0[i] = _get_or_create_continuum_temp(it0, workspace)
         workspace.continuum_temperature_ind1[i] = _get_or_create_continuum_temp(it1, workspace)
         workspace.continuum_temperature_weight[i] = tw
@@ -840,9 +838,9 @@ def _fill_cia_scale_workspace(atmosphere, i_left_species, i_right_species, works
     nlayers = atmosphere.nlayers
     for i in range(nlayers):
         workspace.cia_scale[i] = (
-            atmosphere.densities[i_left_species, i]
-            * atmosphere.densities[i_right_species, i]
-            * atmosphere.dz[i]
+            atmosphere.layer_densities[i_left_species, i]
+            * atmosphere.layer_densities[i_right_species, i]
+            * atmosphere.layer_dz[i]
         )
 
 
@@ -917,7 +915,8 @@ def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream,
             taucld = result.taucld[iw,i]
             w0_cld = result.w0_cld[iw,i]
             g0_cld = result.g0_cld[iw,i]
-            raman_factor = 1.0 # temporary for now
+            # Match the legacy "no Raman" reflected-light baseline.
+            raman_factor = 0.99999
 
             # Apply thinning to cloud
             taucld *= fthin_cld
@@ -1064,19 +1063,25 @@ class RadtranAtmosphere:
 
     species_names: nb.types.ListType(nb.types.unicode_type)
     species_mu: nb.float64[:]
-    pressures: nb.float64[:]
-    temperatures: nb.float64[:]
-    mixing_ratios: nb.float64[:,:]
+    level_pressures: nb.float64[:]
+    level_temperatures: nb.float64[:]
+    level_mixing_ratios: nb.float64[:,:]
+    level_mubar: nb.float64[:]
+    level_z: nb.float64[:]
+    level_dz: nb.float64[:]
+    level_gravity: nb.float64[:]
+    level_scale_height: nb.float64[:]
+    level_density: nb.float64[:]
+    layer_pressures: nb.float64[:]
+    layer_temperatures: nb.float64[:]
+    layer_mixing_ratios: nb.float64[:,:]
+    layer_mubar: nb.float64[:]
+    layer_gravity: nb.float64[:]
+    layer_dz: nb.float64[:]
+    layer_density: nb.float64[:]
+    layer_densities: nb.float64[:,:]
+    layer_columns: nb.float64[:,:]
     reference_pressure: nb.float64
-
-    z: nb.float64[:]
-    z_edge: nb.float64[:]
-    dz: nb.float64[:]
-    gravity: nb.float64[:]
-    mubar: nb.float64[:]
-    density: nb.float64[:] # total molecules/cm^3
-    densities: nb.float64[:,:] # molecules/cm^3 of each species
-    columns: nb.float64[:,:]
 
     def __init__(self):
         self._allocate(0, 0)
@@ -1095,69 +1100,96 @@ class RadtranAtmosphere:
         self.nspecies = atm.nspecies
         self.species_names = atm.species_names
         self.species_mu[:] = atm.species_mu[:]
-        self.pressures[:] = atm.pressures[:]
-        self.temperatures[:] = atm.temperatures[:]
-        self.mixing_ratios[:, :] = atm.mixing_ratios[:, :]
+        self.level_pressures[:] = atm.level_pressures[:]
+        self.level_temperatures[:] = atm.level_temperatures[:]
+        self.level_mixing_ratios[:, :] = atm.level_mixing_ratios[:, :]
+        self.layer_pressures[:] = atm.layer_pressures[:]
+        self.layer_temperatures[:] = atm.layer_temperatures[:]
+        self.layer_mixing_ratios[:, :] = atm.layer_mixing_ratios[:, :]
         self.reference_pressure = atm.reference_pressure
 
-        # Mean molecular weight in each cell.
+        # Mean molecular weight on each level.
+        for i in range(self.nlayers + 1):
+            mu = 0.0
+            for j in range(self.nspecies):
+                mu += self.species_mu[j] * self.level_mixing_ratios[j, i]
+            self.level_mubar[i] = mu
+
+        # Mean molecular weight on each layer.
         for i in range(self.nlayers):
             mu = 0.0
             for j in range(self.nspecies):
-                mu += self.species_mu[j] * self.mixing_ratios[j, i]
-            self.mubar[i] = mu
+                mu += self.species_mu[j] * self.layer_mixing_ratios[j, i]
+            self.layer_mubar[i] = mu
 
-        # Find the layer just above the reference pressure.
-        iref = 0
-        while iref < self.nlayers and self.pressures[iref] < self.reference_pressure:
-            iref += 1
-        if iref == self.nlayers:
-            iref = self.nlayers - 1
+        # Build the hydrostatic solution on the legacy level grid.
+        # The level grid is anchored at the nearest level pressure to the
+        # requested reference pressure, mirroring atmsetup.get_altitude().
+        nlevels = self.nlayers + 1
+        p_reference = self.reference_pressure
+        max_pressure = np.max(self.level_pressures)
+        if p_reference >= max_pressure:
+            p_reference = max_pressure
+        else:
+            p_reference = self.level_pressures[self.level_pressures >= p_reference][0]
 
-        # Planet radius, mass, and semimajor axis are already in CGS units.
         planet_radius = self.radius
         planet_mass = self.mass
+        gravity_work = np.zeros(nlevels, dtype=np.float64)
 
-        # z is the altitude at the midpoint of each cell, and should decrease
-        # with increasing index because pressure increases with index.
-        # Start from the layer nearest the reference pressure and integrate
-        # hydrostatic balance upward and downward.
-        gravity_ref = G_CGS * planet_mass / (planet_radius * planet_radius)
-        scale_height_ref = KB_CGS * self.temperatures[iref] / (self.mubar[iref] * AMU_CGS * gravity_ref)
-        self.z[iref] = -scale_height_ref * np.log(self.pressures[iref] / self.reference_pressure)
+        self.level_z[:] = planet_radius
+        self.level_gravity[:] = 0.0
+        self.level_dz[:] = 0.0
+        self.level_scale_height[:] = 0.0
+        self.level_density[:] = 0.0
+        self.layer_dz[:] = 0.0
 
-        for i in range(iref - 1, -1, -1):
-            gravity_here = G_CGS * planet_mass / ((planet_radius + self.z[i + 1]) * (planet_radius + self.z[i + 1]))
-            scale_height = KB_CGS * self.temperatures[i + 1] / (self.mubar[i + 1] * AMU_CGS * gravity_here)
-            delta_logp = np.log(self.pressures[i + 1] / self.pressures[i])
-            self.z[i] = self.z[i + 1] + scale_height * delta_logp
+        iref = 0
+        while iref < nlevels and self.level_pressures[iref] < p_reference:
+            iref += 1
+        if iref == nlevels:
+            iref = nlevels - 1
 
-        for i in range(iref, self.nlayers - 1):
-            gravity_here = G_CGS * planet_mass / ((planet_radius + self.z[i]) * (planet_radius + self.z[i]))
-            scale_height = KB_CGS * self.temperatures[i] / (self.mubar[i] * AMU_CGS * gravity_here)
-            delta_logp = np.log(self.pressures[i + 1] / self.pressures[i])
-            self.z[i + 1] = self.z[i] - scale_height * delta_logp
+        for i in range(iref, nlevels - 1):
+            gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
+            self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
+            delta_logp = np.log(self.level_pressures[i + 1] / self.level_pressures[i])
+            self.level_dz[i] = self.level_scale_height[i] * delta_logp
+            self.level_z[i + 1] = self.level_z[i] - self.level_dz[i]
 
-        # Build edges from the midpoint altitude grid.
-        self.z_edge[0] = self.z[0] + 0.5 * (self.z[0] - self.z[1])
-        for i in range(1, self.nlayers):
-            self.z_edge[i] = 0.5 * (self.z[i - 1] + self.z[i])
-        self.z_edge[self.nlayers] = self.z[self.nlayers - 1] - 0.5 * (self.z[self.nlayers - 2] - self.z[self.nlayers - 1])
+        for i in range(iref, 0, -1):
+            gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
+            self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
+            delta_logp = np.log(self.level_pressures[i] / self.level_pressures[i - 1])
+            self.level_dz[i] = self.level_scale_height[i] * delta_logp
+            self.level_z[i - 1] = self.level_z[i] + self.level_dz[i]
 
-        # Per-cell thickness from adjacent edges.
+        # Populate the layer gravity using the same ordering as the legacy code:
+        # it is computed before the endpoint gravity values are filled.
+        self.layer_gravity[:] = 0.5 * (gravity_work[:-1] + gravity_work[1:])
+
+        # Populate the endpoint gravity values.
+        for i in range(nlevels):
+            self.level_gravity[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
+            self.level_density[i] = (self.level_pressures[i] * 1.0e6) / (KB_CGS * self.level_temperatures[i])
+
+        self.level_scale_height[:] = (
+            KB_CGS * self.level_temperatures[:] / (self.level_mubar[:] * AMU_CGS * self.level_gravity[:])
+        )
+        if nlevels > 1:
+            self.level_dz[0] = self.level_dz[1]
+            self.level_dz[nlevels - 1] = self.level_dz[nlevels - 2]
+
+        # Layer quantities derived from the legacy level grid.
         for i in range(self.nlayers):
-            self.dz[i] = self.z_edge[i] - self.z_edge[i + 1]
-
-        # Gravity at each cell midpoint.
-        for i in range(self.nlayers):
-            self.gravity[i] = G_CGS * planet_mass / ((planet_radius + self.z[i]) * (planet_radius + self.z[i]))
-
-        # Get densities and columns.
-        for i in range(self.nlayers):
-            self.density[i] = (self.pressures[i] * 1.0e6) / (KB_CGS * self.temperatures[i])
+            self.layer_dz[i] = self.level_z[i] - self.level_z[i + 1]
+            self.layer_density[i] = (self.layer_pressures[i] * 1.0e6) / (KB_CGS * self.layer_temperatures[i])
+            layer_colden = (self.level_pressures[i + 1] - self.level_pressures[i]) * 1.0e6 / self.layer_gravity[i]
             for j in range(self.nspecies):
-                self.densities[j, i] = self.mixing_ratios[j, i] * self.density[i]
-                self.columns[j, i] = self.densities[j, i] * self.dz[i]
+                self.layer_densities[j, i] = self.layer_mixing_ratios[j, i] * self.layer_density[i]
+                self.layer_columns[j, i] = (
+                    self.layer_mixing_ratios[j, i] * layer_colden / (self.layer_mubar[i] * AMU_CGS)
+                )
 
     def _allocate(self, nlayers, nspecies):
         self.nlayers = nlayers
@@ -1167,18 +1199,25 @@ class RadtranAtmosphere:
         self.semimajor = np.nan
         self.species_names = nb.typed.List.empty_list(nb.types.unicode_type)
         self.species_mu = np.empty(nspecies, dtype=np.float64)
-        self.pressures = np.empty(nlayers, dtype=np.float64)
-        self.temperatures = np.empty(nlayers, dtype=np.float64)
-        self.mixing_ratios = np.empty((nspecies, nlayers), dtype=np.float64)
+        self.level_pressures = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_temperatures = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_mixing_ratios = np.empty((nspecies, nlayers + 1), dtype=np.float64)
+        self.level_mubar = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_z = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_dz = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_gravity = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_scale_height = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_density = np.empty(nlayers + 1, dtype=np.float64)
+        self.layer_pressures = np.empty(nlayers, dtype=np.float64)
+        self.layer_temperatures = np.empty(nlayers, dtype=np.float64)
+        self.layer_mixing_ratios = np.empty((nspecies, nlayers), dtype=np.float64)
+        self.layer_mubar = np.empty(nlayers, dtype=np.float64)
+        self.layer_gravity = np.empty(nlayers, dtype=np.float64)
+        self.layer_dz = np.empty(nlayers, dtype=np.float64)
+        self.layer_density = np.empty(nlayers, dtype=np.float64)
+        self.layer_densities = np.empty((nspecies, nlayers), dtype=np.float64)
+        self.layer_columns = np.empty((nspecies, nlayers), dtype=np.float64)
         self.reference_pressure = np.nan
-        self.z = np.empty(nlayers, dtype=np.float64)
-        self.z_edge = np.empty(nlayers + 1, dtype=np.float64)
-        self.dz = np.empty(nlayers, dtype=np.float64)
-        self.gravity = np.empty(nlayers, dtype=np.float64)
-        self.mubar = np.empty(nlayers, dtype=np.float64)
-        self.density = np.empty(nlayers, dtype=np.float64)
-        self.densities = np.empty((nspecies, nlayers), dtype=np.float64)
-        self.columns = np.empty((nspecies, nlayers), dtype=np.float64)
 
     def _ensure(self, nlayers, nspecies):
         if nlayers != self.nlayers or nspecies != self.nspecies:
@@ -1267,7 +1306,7 @@ class Radtran:
             self.clouds = None
             return
 
-        _validate_clouds(clouds, self.atmosphere.pressures, self.opacities.wavelength)
+        _validate_clouds(clouds, self.atmosphere.layer_pressures, self.opacities.wavelength)
         self.clouds = clouds
 
     def _prepare_interpolation(self):
@@ -1299,8 +1338,8 @@ class Radtran:
             self.opacities_result.dtau[:chunk_width, :],
             self.opacities_result.w0[:chunk_width, :],
             self.opacities_result.cosb[:chunk_width, :],
-            self.atmosphere.temperatures,
-            self.atmosphere.pressures,
+            self.atmosphere.layer_temperatures,
+            self.atmosphere.layer_pressures,
             self.phase.ubar1,
             self.opacities_result.surf_reflect[:chunk_width],
             self.settings.hard_surface,
@@ -1435,7 +1474,7 @@ class Radtran:
             if self.clouds is not None and self.clouds.do_holes:
 
                 # Adjust opacities for clear-sky portion
-                self._adjust_opacity_for_clearsky()
+                self._adjust_opacity_for_clearsky(ind_wv0, ind_wv1)
 
                 # Do RT for clear-sky portion
                 self._radiate(ind_wv0, ind_wv1, calculation, scale_factor_clear)

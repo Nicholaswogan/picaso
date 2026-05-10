@@ -2,7 +2,9 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pandas as pd
 import pytest
+import astropy.units as u
 
 # Get the root of the repo and prepend to path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from picaso import disco
 from picaso import atmsetup
+from picaso import justdoit as jdi
 from picaso import fluxes
 from picaso import fluxes_noalloc
 from picaso import experimental
@@ -114,7 +117,13 @@ def _call_experimental(case, hard_surface):
     return flux
 
 
-def _make_reflected_case():
+def _make_reflected_case(
+    phase_angle=0.0,
+    single_phase=0,
+    multi_phase=0,
+    toon_coefficients=0,
+    b_top=0.0,
+):
     return dict(
         nlevel=4,
         nwno=5,
@@ -195,18 +204,18 @@ def _make_reflected_case():
             ]
         ),
         surf_reflect=np.array([0.23, 0.24, 0.25, 0.26, 0.27]),
-        phase_angle=0.0,
-        cos_theta=0.37,
+        phase_angle=phase_angle,
+        cos_theta=float(np.cos(phase_angle)),
         F0PI=np.array([1.13, 1.14, 1.15, 1.16, 1.17]),
-        single_phase=0,
-        multi_phase=0,
+        single_phase=single_phase,
+        multi_phase=multi_phase,
         frac_a=0.17,
         frac_b=0.27,
         frac_c=1.3,
         constant_back=0.29,
         constant_forward=0.39,
-        toon_coefficients=0,
-        b_top=0.07,
+        toon_coefficients=toon_coefficients,
+        b_top=b_top,
     )
 
 
@@ -290,7 +299,6 @@ def _call_experimental_reflected(case):
         ubar0,
         ubar1,
         case["cos_theta"],
-        case["F0PI"].copy(),
         case["single_phase"],
         case["multi_phase"],
         case["frac_a"],
@@ -342,12 +350,219 @@ def test_atmosphere_auto_species_mu():
         ],
         dtype=np.float64,
     )
-    atm = experimental.Atmosphere(species, pressures, temperatures, mixing_ratios)
+    atm = experimental.Atmosphere(species, pressures, temperatures, mixing_ratios, reference_pressure=1.0e-3)
     np.testing.assert_allclose(atm._atm.species_mu, experimental.get_weights(species))
 
 
-def test_experimental_reflected_toa_parity():
-    case = _make_reflected_case()
+def _make_legacy_atmosphere(profile_df):
+    inputs = jdi.inputs()
+    inputs.phase_angle(0.0, num_gangle=10, num_tangle=1)
+    inputs.gravity(
+        radius=1.0,
+        radius_unit=u.Unit("R_earth"),
+        mass=1.0,
+        mass_unit=u.Unit("M_earth"),
+    )
+    inputs.atmosphere(df=profile_df, exclude_mol=None)
+
+    legacy = atmsetup.ATMSETUP(inputs.inputs)
+    legacy.planet.radius = inputs.inputs["planet"]["radius"]
+    legacy.planet.mass = inputs.inputs["planet"]["mass"]
+    legacy.planet.gravity = inputs.inputs["planet"]["gravity"]
+    legacy.get_profile()
+    legacy.get_mmw()
+    legacy.get_density()
+    legacy.get_altitude(p_reference=1.0)
+    legacy.get_column_density()
+    return legacy
+
+
+def test_atmosphere_and_radtran_atmosphere_parity():
+    profile_df = pd.read_csv(jdi.earth_icrccm_pt(), sep=r"\s+")
+    species_names = [col for col in profile_df.columns if col not in ("pressure", "temperature")]
+    pressures = profile_df["pressure"].to_numpy(dtype=np.float64)
+    temperatures = profile_df["temperature"].to_numpy(dtype=np.float64)
+    mixing_ratios = profile_df[species_names].to_numpy(dtype=np.float64).T
+
+    legacy = _make_legacy_atmosphere(profile_df)
+
+    new_atm = experimental.Atmosphere(
+        species_names,
+        pressures,
+        temperatures,
+        mixing_ratios,
+        reference_pressure=1.0,
+    )
+
+    np.testing.assert_allclose(
+        new_atm._atm.level_pressures,
+        np.asarray(legacy.level["pressure_bar"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        new_atm._atm.level_temperatures,
+        np.asarray(legacy.level["temperature"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        new_atm._atm.level_mixing_ratios,
+        np.asarray(legacy.level["mixingratios"], dtype=np.float64).T,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        new_atm._atm.layer_pressures,
+        np.asarray(legacy.layer["pressure"], dtype=np.float64) / 1.0e6,
+        rtol=0.0,
+        atol=1e-15,
+    )
+    np.testing.assert_allclose(
+        new_atm._atm.layer_temperatures,
+        np.asarray(legacy.layer["temperature"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        new_atm._atm.layer_mixing_ratios,
+        np.asarray(legacy.layer["mixingratios"], dtype=np.float64).T,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    planet = experimental.Planet(radius=1.0, mass=1.0, semimajor=1.0)
+    rad_atm = experimental.RadtranAtmosphere()
+    rad_atm.setup(new_atm._atm, planet)
+
+    np.testing.assert_allclose(
+        rad_atm.level_pressures,
+        np.asarray(legacy.level["pressure_bar"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_temperatures,
+        np.asarray(legacy.level["temperature"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_mixing_ratios,
+        np.asarray(legacy.level["mixingratios"], dtype=np.float64).T,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_pressures,
+        np.asarray(legacy.layer["pressure"], dtype=np.float64) / 1.0e6,
+        rtol=0.0,
+        atol=1e-15,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_temperatures,
+        np.asarray(legacy.layer["temperature"], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_mixing_ratios,
+        np.asarray(legacy.layer["mixingratios"], dtype=np.float64).T,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_mubar,
+        np.asarray(legacy.level["mmw"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_mubar,
+        np.asarray(legacy.layer["mmw"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_z,
+        np.asarray(legacy.level["z"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_dz,
+        np.asarray(legacy.level["dz"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_gravity,
+        legacy.c.G * rad_atm.mass / (np.asarray(legacy.level["z"], dtype=np.float64) ** 2),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        rad_atm.level_density,
+        np.asarray(legacy.level["den"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_gravity,
+        np.asarray(legacy.layer["gravity"], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_density,
+        np.asarray(legacy.layer["pressure"], dtype=np.float64) / (
+            legacy.c.k_b * np.asarray(legacy.layer["temperature"], dtype=np.float64)
+        ),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    expected_layer_columns = (
+        np.asarray(legacy.layer["mixingratios"], dtype=np.float64).T
+        * (
+            np.asarray(legacy.layer["colden"], dtype=np.float64)
+            / (np.asarray(legacy.layer["mmw"], dtype=np.float64) * legacy.c.amu)
+        )
+    )
+    np.testing.assert_allclose(
+        rad_atm.layer_columns,
+        expected_layer_columns,
+        rtol=1e-12,
+        atol=1e-8,
+    )
+
+
+REFLECTED_KERNEL_CASES = [
+    pytest.param(
+        dict(phase_angle=0.0, single_phase=0, multi_phase=0, toon_coefficients=0),
+        id="phase0-single0-multi0-toon0",
+    ),
+    pytest.param(
+        dict(phase_angle=0.0, single_phase=1, multi_phase=0, toon_coefficients=1),
+        id="phase0-single1-multi0-toon1",
+    ),
+    pytest.param(
+        dict(phase_angle=0.0, single_phase=2, multi_phase=1, toon_coefficients=0),
+        id="phase0-single2-multi1-toon0",
+    ),
+    pytest.param(
+        dict(phase_angle=np.pi / 2.0, single_phase=3, multi_phase=0, toon_coefficients=1),
+        id="phase90-single3-multi0-toon1",
+    ),
+    pytest.param(
+        dict(phase_angle=np.pi / 2.0, single_phase=0, multi_phase=1, toon_coefficients=0),
+        id="phase90-single0-multi1-toon0",
+    ),
+]
+
+
+@pytest.mark.parametrize("reflected_case_kwargs", REFLECTED_KERNEL_CASES)
+def test_experimental_reflected_toa_parity(reflected_case_kwargs):
+    case = _make_reflected_case(**reflected_case_kwargs)
     gangle, gweight, tangle, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     _, _, _, _, _ = disco.compute_disco(case["numg"], case["numt"], gangle, tangle, case["phase_angle"])
     expected = disco.compress_disco(
