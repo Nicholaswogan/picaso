@@ -797,6 +797,13 @@ class RadtranOpacities:
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
             _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
 
+        # Raman
+        compute_raman(
+            settings.raman,
+            opacities_result.wavelength_um[:chunk_width],
+            opacities_result.raman_factor[:chunk_width],
+        )
+
         # Clouds
         taucld = opacities_result.taucld[:chunk_width, :]
         w0_cld = opacities_result.w0_cld[:chunk_width, :]
@@ -809,12 +816,6 @@ class RadtranOpacities:
             taucld[:,:] = 0.0
             w0_cld[:,:] = 0.0
             g0_cld[:,:] = 0.0
-
-        compute_raman(
-            settings.raman,
-            opacities_result.wavelength_um[:chunk_width],
-            opacities_result.raman_factor[:chunk_width],
-        )
 
         # All of these will ultimately be inputs
         _finish_compute_opacity(
