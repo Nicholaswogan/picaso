@@ -168,7 +168,20 @@ class Atmosphere_:
                     "pressures must be strictly increasing with layer index "
                     f"({pressures[i+1]} <= {pressures[i]} at indices {i+1} and {i})"
                 )
-        
+
+        # Normalize mixing ratios in place so each level sums to one.
+        # Do this before deriving layer quantities to keep the layer state consistent.
+        for i in range(nlevels):
+            level_sum = 0.0
+            for j in range(nspecies):
+                level_sum += mixing_ratios[j, i]
+            if level_sum <= 0.0:
+                raise ValueError(
+                    f"mixing_ratios at level {i} must sum to a positive value, got {level_sum}"
+                )
+            for j in range(nspecies):
+                mixing_ratios[j, i] /= level_sum
+
         # Check that reference pressure is in pressures
         if reference_pressure < pressures[0] or reference_pressure > pressures[-1]:
             raise ValueError(

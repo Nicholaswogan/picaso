@@ -363,6 +363,13 @@ def _make_legacy_atmosphere(profile_df):
         mass=1.0,
         mass_unit=u.Unit("M_earth"),
     )
+
+    profile_df = profile_df.copy()
+    species_names = [col for col in profile_df.columns if col not in ("pressure", "temperature")]
+    mixing = profile_df[species_names].to_numpy(dtype=np.float64)
+    mixing /= np.sum(mixing, axis=1, keepdims=True)
+    profile_df.loc[:, species_names] = mixing
+
     inputs.atmosphere(df=profile_df, exclude_mol=None)
 
     legacy = atmsetup.ATMSETUP(inputs.inputs)
