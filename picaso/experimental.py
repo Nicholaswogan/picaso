@@ -292,6 +292,43 @@ class Clouds:
         self.fthin_cld = fthin_cld
         self.fhole = fhole
 
+
+@dataclass(frozen=True, slots=True)
+class Surface:
+    """Surface boundary condition for reflected and thermal solves."""
+
+    hard_surface: bool = False
+    reflectance: np.ndarray | float = 0.0
+
+    def __post_init__(self):
+        if not isinstance(self.hard_surface, bool):
+            raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
+
+        if np.isscalar(self.reflectance):
+            if not np.isfinite(self.reflectance):
+                raise ValueError("reflectance must be finite")
+            if self.reflectance < 0.0 or self.reflectance > 1.0:
+                raise ValueError(f"reflectance must lie in [0, 1], got {self.reflectance}")
+            return
+
+        if not isinstance(self.reflectance, np.ndarray):
+            raise TypeError(
+                f"reflectance must be a scalar or 1D numpy.ndarray, got {type(self.reflectance)!r}"
+            )
+        if self.reflectance.ndim != 1:
+            raise ValueError(f"reflectance must be scalar or 1D, got shape {self.reflectance.shape}")
+        _check_reflectance(self.reflectance)
+
+
+@nb.njit
+def _check_reflectance(reflectance):
+    for i in range(reflectance.shape[0]):
+        value = reflectance[i]
+        if not np.isfinite(value):
+            raise ValueError(f"reflectance must contain only finite values, got {value} at index {i}")
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"reflectance must lie in [0, 1], got {value} at index {i}")
+
 class Star:
     pass
 
@@ -318,7 +355,6 @@ class Planet:
         
 @dataclass
 class RadtranSettings:
-    hard_surface: bool = False
     single_phase: int = 3
     multi_phase: int = 0
     frac_a: float = 1.0
@@ -621,7 +657,16 @@ class RadtranOpacities:
             out_row[:] = raw_out
         out_row += post_decode_log10_factor
 
-    def compute_opacity(self, atmosphere: RadtranAtmosphere, settings: RadtranSettings, clouds: Clouds, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+    def compute_opacity(
+        self, 
+        atmosphere: RadtranAtmosphere, 
+        settings: RadtranSettings, 
+        clouds: Clouds, 
+        surface: Surface, 
+        ind_wv0: int, 
+        ind_wv1: int, 
+        opacities_result: RadtranOpacitiesResult
+    ):
         chunk_width = ind_wv1 - ind_wv0
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
@@ -632,9 +677,12 @@ class RadtranOpacities:
             molecular_raw_buffer = self.workspace.molecular_raw_f32
             continuum_raw_buffer = self.workspace.continuum_raw_f32
 
-        # Set nwavelengths and wavelengths
+        # wavelengths and surface
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
-        opacities_result.surf_reflect[:chunk_width] = 0.0
+        if np.isscalar(surface.reflectance):
+            opacities_result.surf_reflect[:chunk_width] = float(surface.reflectance)
+        else:
+            opacities_result.surf_reflect[:chunk_width] = surface.reflectance[ind_wv0:ind_wv1]
 
         # Line by line
         taugas = opacities_result.taugas[:chunk_width, :]
@@ -1280,6 +1328,7 @@ class Radtran:
         # Atmosphere
         self.atmosphere = RadtranAtmosphere()
         self.clouds = None
+        self.surface = None
 
         # Solvers
         self.thermal = ThermalSolver()
@@ -1327,13 +1376,39 @@ class Radtran:
         _validate_clouds(clouds, self.atmosphere.layer_pressures, self.opacities.wavelength)
         self.clouds = clouds
 
+    def _setup_surface(self, surface: Surface):
+        "Validate then set the surface boundary condition"
+
+        if surface is None:
+            self.surface = Surface(hard_surface=False) # default
+            return
+
+        if not isinstance(surface, Surface):
+            raise TypeError(f"surface must be a Surface or None, got {type(surface)!r}")
+
+        if not np.isscalar(surface.reflectance):
+            if surface.reflectance.shape != self.opacities.wavelength.shape:
+                raise ValueError(
+                    "surface.reflectance must either be scalar or match the full wavelength grid "
+                    f"shape {self.opacities.wavelength.shape}, got {surface.reflectance.shape}"
+                )
+        self.surface = surface
+
     def _prepare_interpolation(self):
         "Prepared interpolation for computing opacities"
         self.opacities.prepare_interpolation(self.atmosphere, self.nwavelengths_per_chunk)
 
     def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
-        self.opacities.compute_opacity(self.atmosphere, self.settings, self.clouds, ind_wv0, ind_wv1, self.opacities_result)
+        self.opacities.compute_opacity(
+            self.atmosphere,
+            self.settings,
+            self.clouds,
+            self.surface,
+            ind_wv0,
+            ind_wv1,
+            self.opacities_result,
+        )
 
     def _adjust_opacity_for_clearsky(self, ind_wv0, ind_wv1):
         "Adjust opacity for clear-sky portin of atmosphere"
@@ -1360,7 +1435,7 @@ class Radtran:
             self.atmosphere.layer_pressures,
             self.phase.ubar1,
             self.opacities_result.surf_reflect[:chunk_width],
-            self.settings.hard_surface,
+            self.surface.hard_surface,
             self.opacities_result.spectrum[:chunk_width],
         )
 
@@ -1455,6 +1530,7 @@ class Radtran:
         atm: Atmosphere,
         planet: Planet,
         clouds: Clouds = None,
+        surface: Surface = None,
         star: Star = None,
         calculation='thermal',
         nwavelengths_per_chunk=10_000,
@@ -1473,6 +1549,9 @@ class Radtran:
 
         # Setup clouds
         self._setup_clouds(clouds)
+
+        # Setup surface boundary condition
+        self._setup_surface(surface)
 
         # Determine some scale factors for patchy clouds, if needed
         if self.clouds is not None and self.clouds.do_holes:
