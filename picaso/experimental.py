@@ -343,10 +343,42 @@ def _check_reflectance(reflectance):
         if value < 0.0 or value > 1.0:
             raise ValueError(f"reflectance must lie in [0, 1], got {value} at index {i}")
 
+@dataclass(frozen=True, slots=True)
 class Star:
-    pass
 
-    
+    radius: float
+    wavelength: np.ndarray | None = None
+    spectrum: np.ndarray | None = None
+
+    def __post_init__(self):
+
+        if self.radius < 0.0:
+            raise ValueError(f"radius must be nonnegative, got {self.radius}")
+
+        if self.wavelength is None:
+            if self.spectrum is not None:
+                raise ValueError("wavelength and spectrum must either both be provided or both be None")
+            return
+        if self.spectrum is None:
+            if self.wavelength is not None:
+                raise ValueError("wavelength and spectrum must either both be provided or both be None")
+            return
+        
+        if not isinstance(self.wavelength, np.ndarray):
+            raise ValueError(f"wavelength must be a numpy.ndarray or None, got {type(self.wavelength)!r}")
+        if not isinstance(self.spectrum, np.ndarray):
+            raise ValueError(f"spectrum must be a numpy.ndarray or None, got {type(self.spectrum)!r}")
+        _check_spectrum(self.spectrum)
+        
+@nb.njit
+def _check_spectrum(spectrum):
+    for i in range(spectrum.shape[0]):
+        value = spectrum[i]
+        if not np.isfinite(value):
+            raise ValueError(f"spectrum must contain only finite values, got {value} at index {i}")
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"spectrum must lie in [0, 1], got {value} at index {i}")
+
 @nb.experimental.jitclass
 class Planet:
 
@@ -1349,13 +1381,13 @@ def _validate_clouds(clouds: Clouds, pressures, wavelength):
             )
 
 @nb.njit
-def _validate_surface(wavelength_surface, wavelength_radtran):
+def _validate_wavelength(wavelength1, wavelength2):
 
-    if len(wavelength_surface) != len(wavelength_radtran):
-        raise ValueError("surface wavelength grid must match the Radtran wavelength grid")
-    for i in range(len(wavelength_surface)):
-        if not np.isclose(wavelength_surface[i], wavelength_radtran[i]):
-            raise ValueError(f"surface wavelength grid must match the Radtran wavelength grid at index {i}")
+    if len(wavelength1) != len(wavelength2):
+        raise ValueError("External wavelength grid must match the Radtran wavelength grid")
+    for i in range(len(wavelength1)):
+        if not np.isclose(wavelength1[i], wavelength2[i]):
+            raise ValueError(f"External wavelength grid must match the Radtran wavelength grid at index {i}")
 
 class Radtran:
     "Radiative-transfer driver."
@@ -1376,6 +1408,7 @@ class Radtran:
         self.atmosphere = RadtranAtmosphere()
         self.clouds = None
         self.surface = None
+        self.star = None
 
         # Solvers
         self.thermal = ThermalSolver()
@@ -1434,9 +1467,23 @@ class Radtran:
             raise TypeError(f"surface must be a Surface or None, got {type(surface)!r}")
 
         if not np.isscalar(surface.reflectance):
-            _validate_surface(surface.wavelength, self.opacities.wavelength)
+            _validate_wavelength(surface.wavelength, self.opacities.wavelength)
 
         self.surface = surface
+
+    def _setup_star(self, star: Star):
+
+        if star is None:
+            self.star = None
+            return
+        
+        if not isinstance(star, Star):
+            raise TypeError(f"star must be a Star or None, got {type(star)!r}")
+        
+        if star.wavelength is not None:
+            _validate_wavelength(star.wavelength, self.opacities.wavelength)
+
+        self.star = star
 
     def _prepare_interpolation(self):
         "Prepared interpolation for computing opacities"
@@ -1596,6 +1643,9 @@ class Radtran:
 
         # Setup surface boundary condition
         self._setup_surface(surface)
+
+        # Setup star
+        self._setup_star(star)
 
         # Determine some scale factors for patchy clouds, if needed
         if self.clouds is not None and self.clouds.do_holes:
