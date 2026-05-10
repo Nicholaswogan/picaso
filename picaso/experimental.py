@@ -34,6 +34,7 @@ AMU_CGS = 1.66053906660e-24
 G_CGS = 6.67430e-8
 M_EARTH_CGS = 5.972167867791379e27
 R_EARTH_CGS = 6.3781e8
+R_SUN_CGS = 6.957e10
 CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
 # Convert number column density to molar column density for legacy Rayleigh parity.
 AVOGADRO = 6.02214076e23
@@ -354,6 +355,7 @@ class Star:
 
         if self.radius < 0.0:
             raise ValueError(f"radius must be nonnegative, got {self.radius}")
+        object.__setattr__(self, "radius", self.radius * R_SUN_CGS)
 
         if self.wavelength is None:
             if self.spectrum is not None:
