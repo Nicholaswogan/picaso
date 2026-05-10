@@ -1268,7 +1268,6 @@ class Radtran:
     def __init__(
         self,
         opacity_filename: str,
-        nwavelengths_per_chunk=None,
         wavelength_range=None,
         settings_kwargs=None,
         phase_kwargs=None,
@@ -1277,15 +1276,6 @@ class Radtran:
         # Opacities
         self.opacities = RadtranOpacities(opacity_filename, wavelength_range=wavelength_range)
         self.opacities_result = RadtranOpacitiesResult()
-
-        # Work out the wavelength chunking
-        self.nwavelengths_per_chunk = nwavelengths_per_chunk
-        if self.nwavelengths_per_chunk is None:
-            self.nwavelengths_per_chunk = self.opacities.nwavelength
-        if self.nwavelengths_per_chunk <= 0:
-            raise ValueError("nwavelengths_per_chunk must be positive")
-        # Number of wavelength chunks
-        self.nwavelength_chunks = (self.opacities.nwavelength + self.nwavelengths_per_chunk - 1) // self.nwavelengths_per_chunk
 
         # Atmosphere
         self.atmosphere = RadtranAtmosphere()
@@ -1307,6 +1297,21 @@ class Radtran:
         if settings_kwargs is None:
             settings_kwargs = {}
         self.settings = RadtranSettings(**settings_kwargs)
+
+        # Variables that will be set later
+        self.nwavelengths_per_chunk = None
+        self.nwavelength_chunks = None
+
+    def _set_wavelength_chunks(self, nwavelengths_per_chunk):
+
+        # Work out the wavelength chunking
+        self.nwavelengths_per_chunk = nwavelengths_per_chunk
+        if self.nwavelengths_per_chunk is None:
+            self.nwavelengths_per_chunk = self.opacities.nwavelength
+        if self.nwavelengths_per_chunk <= 0:
+            raise ValueError("nwavelengths_per_chunk must be positive")
+        # Number of wavelength chunks
+        self.nwavelength_chunks = (self.opacities.nwavelength + self.nwavelengths_per_chunk - 1) // self.nwavelengths_per_chunk
 
     def _setup_atmosphere(self, atm: Atmosphere, planet: Planet):
         "Setup atmospheric grid."
@@ -1445,12 +1450,23 @@ class Radtran:
         elif calculation == 'reflected':
             return self.reflected_result
     
-    def spectrum(self, atm: Atmosphere, planet: Planet, clouds: Clouds=None, star: Star=None, calculation='thermal'):
+    def spectrum(
+        self,
+        atm: Atmosphere,
+        planet: Planet,
+        clouds: Clouds = None,
+        star: Star = None,
+        calculation='thermal',
+        nwavelengths_per_chunk=10_000,
+    ):
 
         if calculation not in ['thermal', 'reflected']:
             raise ValueError(
                 f"calculation must be 'thermal' or 'reflected', got {calculation!r}"
             )
+        
+        # Set wavelength chunking
+        self._set_wavelength_chunks(nwavelengths_per_chunk)
 
         # Setup the atmospheric grid.
         self._setup_atmosphere(atm, planet)
