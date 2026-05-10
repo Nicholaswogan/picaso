@@ -26,6 +26,7 @@ from .experimental_fluxes import (
 )
 from .experimental_rayleigh import compute_sigma as compute_rayleigh_sigma
 from .experimental_rayleigh import RAYLEIGH_MOLECULES
+from .experimental_raman import compute_raman
 
 # cgs constants for the compiled hydrostatic setup
 KB_CGS = 1.380649e-16
@@ -366,7 +367,7 @@ class Planet:
         self.mass = mass
         self.semimajor = semimajor
         
-@dataclass
+@dataclass(frozen=True, slots=True)
 class RadtranSettings:
     single_phase: int = 3
     multi_phase: int = 0
@@ -378,6 +379,11 @@ class RadtranSettings:
     toon_coefficients: int = 0
     stream: float = 2.0
     delta_eddington: bool = True
+    raman: int = 1
+
+    def __post_init__(self):
+        if self.raman not in (1, 2):
+            raise ValueError(f"raman must be 1 or 2, got {self.raman}")
 
 @dataclass
 class RadtranPhase:
@@ -804,8 +810,20 @@ class RadtranOpacities:
             w0_cld[:,:] = 0.0
             g0_cld[:,:] = 0.0
 
+        compute_raman(
+            settings.raman,
+            opacities_result.wavelength_um[:chunk_width],
+            opacities_result.raman_factor[:chunk_width],
+        )
+
         # All of these will ultimately be inputs
-        _finish_compute_opacity(opacities_result, chunk_width, settings.stream, settings.delta_eddington, fthin_cld=1.0)
+        _finish_compute_opacity(
+            opacities_result,
+            chunk_width,
+            settings.stream,
+            settings.delta_eddington,
+            fthin_cld=1.0,
+        )
     
     def adjust_opacity_for_clearsky(self, clouds: Clouds, settings: RadtranSettings, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
         
@@ -814,7 +832,13 @@ class RadtranOpacities:
         
         chunk_width = ind_wv1 - ind_wv0
 
-        _finish_compute_opacity(opacities_result, chunk_width, settings.stream, settings.delta_eddington, clouds.fthin_cld)
+        _finish_compute_opacity(
+            opacities_result,
+            chunk_width,
+            settings.stream,
+            settings.delta_eddington,
+            clouds.fthin_cld,
+        )
 
     def close(self) -> None:
         if getattr(self, "file", None) is not None:
@@ -989,8 +1013,7 @@ def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream,
             taucld = result.taucld[iw,i]
             w0_cld = result.w0_cld[iw,i]
             g0_cld = result.g0_cld[iw,i]
-            # Match the legacy "no Raman" reflected-light baseline.
-            raman_factor = 0.99999
+            raman_factor = result.raman_factor[iw]
 
             # Apply thinning to cloud
             taucld *= fthin_cld
@@ -1086,6 +1109,7 @@ class RadtranOpacitiesResult:
     w0 : nb.float64[:,:]
     w0_no_raman : nb.float64[:,:]
     cosb : nb.float64[:,:]
+    raman_factor : nb.float64[:]
 
     spectrum : nb.float64[:]
 
@@ -1118,6 +1142,7 @@ class RadtranOpacitiesResult:
         self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.w0_no_raman = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.raman_factor = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
         self.spectrum = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
