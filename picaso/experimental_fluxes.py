@@ -117,6 +117,7 @@ class ThermalResult:
     nwavelengths: nb.int64
     wavelength_um: nb.float64[:] # Wavelengths in microns
     thermal: nb.float64[:] # Disk-integrated TOA flux in CGS units
+    fpfs: nb.float64[:] 
 
     def __init__(self):
         self._allocate(0)
@@ -125,6 +126,7 @@ class ThermalResult:
         self.nwavelengths = nwavelengths
         self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
         self.thermal = np.empty(nwavelengths, dtype=np.float64)
+        self.fpfs = np.empty(nwavelengths, dtype=np.float64)
 
     def _ensure(self, nwavelengths):
         if nwavelengths != self.nwavelengths:

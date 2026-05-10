@@ -1605,7 +1605,14 @@ class Radtran:
 
     def _post_process(self, calculation):
         if calculation == 'thermal':
-            pass
+            if self.star is None or self.star.wavelength is None or self.star.spectrum is None:
+                # No star provided
+                self.thermal_result.fpfs[:] = np.nan
+                return
+            fpfs_scale = (self.atmosphere.radius / self.star.radius) ** 2.0
+            self.thermal_result.fpfs[:] = self.thermal_result.thermal[:]
+            self.thermal_result.fpfs[:] /= self.star.spectrum
+            self.thermal_result.fpfs[:] *= fpfs_scale
         elif calculation == 'reflected':
             fpfs_scale = (self.atmosphere.radius / self.atmosphere.semimajor) ** 2.0
             self.reflected_result.fpfs[:] = self.reflected_result.albedo[:] * fpfs_scale
