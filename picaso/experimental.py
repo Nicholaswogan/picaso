@@ -299,8 +299,10 @@ class Surface:
 
     hard_surface: bool = False
     reflectance: np.ndarray | float = 0.0
+    wavelength: np.ndarray | None = None
 
     def __post_init__(self):
+
         if not isinstance(self.hard_surface, bool):
             raise TypeError(f"hard_surface must be a bool, got {type(self.hard_surface)!r}")
 
@@ -315,8 +317,19 @@ class Surface:
             raise TypeError(
                 f"reflectance must be a scalar or 1D numpy.ndarray, got {type(self.reflectance)!r}"
             )
+        if not isinstance(self.wavelength, np.ndarray):
+            raise TypeError(
+                f"wavelength must be a scalar or 1D numpy.ndarray, got {type(self.wavelength)!r}"
+            )
         if self.reflectance.ndim != 1:
             raise ValueError(f"reflectance must be scalar or 1D, got shape {self.reflectance.shape}")
+        if self.wavelength.ndim != 1:
+            raise ValueError(f"wavelength must be scalar or 1D, got shape {self.wavelength.shape}")
+        if self.reflectance.shape[0] != self.wavelength.shape[0]:
+            raise ValueError(
+                "reflectance and wavelength must have the same length, "
+                f"got {self.reflectance.shape[0]} and {self.wavelength.shape[0]}"
+            )
         _check_reflectance(self.reflectance)
 
 
@@ -1309,6 +1322,14 @@ def _validate_clouds(clouds: Clouds, pressures, wavelength):
                 f"got {clouds.pressure[i]} and {pressures[i]}"
             )
 
+@nb.njit
+def _validate_surface(wavelength_surface, wavelength_radtran):
+
+    if len(wavelength_surface) != len(wavelength_radtran):
+        raise ValueError("surface wavelength grid must match the Radtran wavelength grid")
+    for i in range(len(wavelength_surface)):
+        if not np.isclose(wavelength_surface[i], wavelength_radtran[i]):
+            raise ValueError(f"surface wavelength grid must match the Radtran wavelength grid at index {i}")
 
 class Radtran:
     "Radiative-transfer driver."
@@ -1387,11 +1408,8 @@ class Radtran:
             raise TypeError(f"surface must be a Surface or None, got {type(surface)!r}")
 
         if not np.isscalar(surface.reflectance):
-            if surface.reflectance.shape != self.opacities.wavelength.shape:
-                raise ValueError(
-                    "surface.reflectance must either be scalar or match the full wavelength grid "
-                    f"shape {self.opacities.wavelength.shape}, got {surface.reflectance.shape}"
-                )
+            _validate_surface(surface.wavelength, self.opacities.wavelength)
+
         self.surface = surface
 
     def _prepare_interpolation(self):
