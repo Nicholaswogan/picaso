@@ -382,8 +382,6 @@ def _check_spectrum(spectrum):
         value = spectrum[i]
         if not np.isfinite(value):
             raise ValueError(f"spectrum must contain only finite values, got {value} at index {i}")
-        if value < 0.0 or value > 1.0:
-            raise ValueError(f"spectrum must lie in [0, 1], got {value} at index {i}")
 
 @nb.experimental.jitclass
 class Planet:

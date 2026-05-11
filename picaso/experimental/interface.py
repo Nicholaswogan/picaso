@@ -5,10 +5,10 @@ from . import driver
 
 class ExperimentalRT:
 
-    def __init__(self, *args, **kwargs):
-        self.rad = driver.Radtran(*args, **kwargs)
+    def __init__(self, opacity_filename, wavelength_range, nwavelengths_per_chunk):
+        self.rad = driver.Radtran(opacity_filename, wavelength_range)
         self.wno = 1.0e4/self.rad.opacities.wavelength[::-1]
-        self.nwavelengths_per_chunk = kwargs['nwavelengths_per_chunk']
+        self.nwavelengths_per_chunk = nwavelengths_per_chunk
 
 def opannection(
     wave_range=None, 
@@ -117,7 +117,7 @@ def bundle_to_planet(bundle):
     return driver.Planet(radius=radius, mass=mass, semimajor=semi_major)
 
 
-def bundle_to_clouds(bundle):
+def bundle_to_clouds(bundle, opacityclass, atmosphere):
     """Convert a legacy PICASO bundle into a new experimental Clouds object."""
     if "clouds" not in bundle.inputs:
         raise ValueError("bundle.inputs must contain a 'clouds' section")
@@ -135,33 +135,19 @@ def bundle_to_clouds(bundle):
         raise ValueError(
             f"bundle.inputs['clouds']['profile'] must be a pandas DataFrame, got {type(profile)!r}"
         )
-    for key in ("pressure", "wavenumber", "opd", "w0", "g0"):
-        if key not in profile.columns:
-            raise ValueError(f"bundle cloud profile must contain a '{key}' column")
 
-    profile = profile.sort_values(["pressure", "wavenumber"]).reset_index(drop=True)
-    pressure = profile["pressure"].unique()
-    wavenumber = profile["wavenumber"].unique()
-
-    if profile.shape[0] != pressure.size * wavenumber.size:
-        raise ValueError(
-            "bundle cloud profile must be a complete pressure x wavenumber grid, "
-            f"got {profile.shape[0]} rows for {pressure.size} pressures and {wavenumber.size} wavenumbers"
-        )
-
-    opd = profile.pivot(index="pressure", columns="wavenumber", values="opd").to_numpy(dtype=np.float64).T[::-1]
-    w0 = profile.pivot(index="pressure", columns="wavenumber", values="w0").to_numpy(dtype=np.float64).T[::-1]
-    g0 = profile.pivot(index="pressure", columns="wavenumber", values="g0").to_numpy(dtype=np.float64).T[::-1]
-
-    wavelength = np.asarray(1.0e4 / wavenumber[::-1], dtype=np.float64)
-    pressure = np.asarray(pressure, dtype=np.float64)
-
+    # Get each variable without copies
+    pressure = atmosphere._atm.layer_pressures
+    shape = (opacityclass.rad.opacities.nwavelength, len(pressure))
+    opd = profile['opd'].to_numpy(copy=False).reshape(shape)[::-1, :]
+    w0 = profile['w0'].to_numpy(copy=False).reshape(shape)[::-1, :]
+    g0 = profile['g0'].to_numpy(copy=False).reshape(shape)[::-1, :]
     do_holes = clouds.get("do_holes", False)
     fthin_cld = clouds.get("fthin_cld", 1.0)
     fhole = clouds.get("fhole", 0.0)
 
     return driver.Clouds(
-        wavelength=wavelength,
+        wavelength=opacityclass.rad.opacities.wavelength,
         pressure=pressure,
         opd=opd,
         w0=w0,
@@ -179,7 +165,7 @@ def bundle_to_surface(bundle, opacityclass):
         raise ValueError("bundle.inputs must contain a 'hard_surface' field when 'surface_reflect' is present")
 
     reflectance = bundle.inputs["surface_reflect"]
-    hard_surface = bundle.inputs["hard_surface"]
+    hard_surface = bool(bundle.inputs["hard_surface"])
     if reflectance is None:
         return None
     if not isinstance(hard_surface, (bool, np.bool_)):
@@ -211,7 +197,7 @@ def bundle_to_surface(bundle, opacityclass):
         wavelength=wavelength.copy(),
     )
 
-def bundle_to_star(bundle, opacityclass):
+def bundle_to_star(bundle):
     """Convert a legacy PICASO bundle into a new experimental Star object."""
     if "star" not in bundle.inputs:
         raise ValueError("bundle.inputs must contain a 'star' section")
@@ -446,7 +432,7 @@ def picaso(
     # Convert inputs
     atmosphere = bundle_to_atmosphere(bundle)
     planet = bundle_to_planet(bundle)
-    clouds = bundle_to_clouds(bundle)
+    clouds = bundle_to_clouds(bundle, opacityclass, atmosphere)
     surface = bundle_to_surface(bundle, opacityclass)
     star = bundle_to_star(bundle)
     settings = bundle_to_settings(bundle)
