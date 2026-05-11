@@ -136,12 +136,20 @@ def bundle_to_clouds(bundle, opacityclass, atmosphere):
             f"bundle.inputs['clouds']['profile'] must be a pandas DataFrame, got {type(profile)!r}"
         )
 
-    # Get each variable without copies
+    # Get each variable without copies.
+    # Legacy cloud tables are stored pressure-major, then wavenumber-major.
     pressure = atmosphere._atm.layer_pressures
-    shape = (opacityclass.rad.opacities.nwavelength, len(pressure))
-    opd = profile['opd'].to_numpy(copy=False).reshape(shape)[::-1, :]
-    w0 = profile['w0'].to_numpy(copy=False).reshape(shape)[::-1, :]
-    g0 = profile['g0'].to_numpy(copy=False).reshape(shape)[::-1, :]
+    nwavelength = opacityclass.rad.opacities.nwavelength
+    nlayer = len(pressure)
+    if profile.shape[0] != nlayer * nwavelength:
+        raise ValueError(
+            "bundle cloud profile must contain a complete pressure x wavenumber grid, "
+            f"got {profile.shape[0]} rows for {nlayer} layers and {nwavelength} wavelengths"
+        )
+    shape = (nlayer, nwavelength)
+    opd = profile['opd'].to_numpy(copy=False).reshape(shape).T[::-1, :]
+    w0 = profile['w0'].to_numpy(copy=False).reshape(shape).T[::-1, :]
+    g0 = profile['g0'].to_numpy(copy=False).reshape(shape).T[::-1, :]
     do_holes = clouds.get("do_holes", False)
     fthin_cld = clouds.get("fthin_cld", 1.0)
     fhole = clouds.get("fhole", 0.0)
