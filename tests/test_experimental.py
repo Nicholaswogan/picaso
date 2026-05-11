@@ -315,6 +315,67 @@ def _call_experimental_reflected(case):
     return albedo
 
 
+def _make_transmission_case():
+    return dict(
+        nlevel=4,
+        nwno=5,
+        z=np.array([4.0e8, 3.0e8, 2.0e8, 1.0e8], dtype=np.float64),
+        dz=np.array([1.0e8, 1.0e8, 1.0e8, 1.0e8], dtype=np.float64),
+        rstar=6.957e10,
+        mmw=np.array([2.3, 2.4, 2.5], dtype=np.float64),
+        player=np.array([1.0e6, 5.0e5, 1.0e5], dtype=np.float64),
+        tlayer=np.array([300.0, 250.0, 200.0], dtype=np.float64),
+        colden=np.array([1.0e21, 1.1e21, 1.2e21], dtype=np.float64),
+        dtau=np.array(
+            [
+                [0.05, 0.06, 0.07],
+                [0.07, 0.08, 0.09],
+                [0.17, 0.18, 0.19],
+                [0.27, 0.28, 0.29],
+                [0.37, 0.38, 0.39],
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+
+def _call_legacy_transmission(case):
+    return fluxes.get_transit_1d.py_func(
+        case["z"].copy(),
+        case["dz"].copy(),
+        case["nlevel"],
+        case["nwno"],
+        case["rstar"],
+        case["mmw"].copy(),
+        experimental.KB_CGS,
+        experimental.AMU_CGS,
+        case["player"].copy(),
+        case["tlayer"].copy(),
+        case["colden"].copy(),
+        case["dtau"].T.copy(),
+    )
+
+
+def _call_experimental_transmission(case):
+    transit_depth = np.full(case["nwno"], np.nan, dtype=np.float64)
+    experimental_fluxes.get_transit_1d.py_func(
+        case["nlevel"],
+        case["nwno"],
+        case["z"].copy(),
+        case["dz"].copy(),
+        case["rstar"],
+        case["mmw"].copy(),
+        experimental.KB_CGS,
+        experimental.AMU_CGS,
+        case["player"].copy(),
+        case["tlayer"].copy(),
+        case["colden"].copy(),
+        case["dtau"].copy(),
+        transit_depth,
+    )
+    return transit_depth
+
+
 @pytest.mark.parametrize("hard_surface", [0, 1])
 def test_experimental_thermal_toa_parity(hard_surface):
     case = _make_thermal_case()
@@ -443,8 +504,8 @@ def test_atmosphere_and_radtran_atmosphere_parity():
     rad_atm.setup(new_atm._atm, planet)
 
     np.testing.assert_allclose(
-        rad_atm.level_pressures,
-        np.asarray(legacy.level["pressure_bar"], dtype=np.float64),
+        rad_atm.level_pressures_cgs,
+        np.asarray(legacy.level["pressure"], dtype=np.float64),
         rtol=0.0,
         atol=0.0,
     )
@@ -461,10 +522,10 @@ def test_atmosphere_and_radtran_atmosphere_parity():
         atol=0.0,
     )
     np.testing.assert_allclose(
-        rad_atm.layer_pressures,
-        np.asarray(legacy.layer["pressure"], dtype=np.float64) / 1.0e6,
+        rad_atm.layer_pressures_cgs,
+        np.asarray(legacy.layer["pressure"], dtype=np.float64),
         rtol=0.0,
-        atol=1e-15,
+        atol=1e-9,
     )
     np.testing.assert_allclose(
         rad_atm.layer_temperatures,
@@ -581,6 +642,15 @@ def test_experimental_reflected_toa_parity(reflected_case_kwargs):
         case["F0PI"].copy(),
     )
     actual = _call_experimental_reflected(case)
+
+    assert actual.shape == (case["nwno"],)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_experimental_transmission_toa_parity():
+    case = _make_transmission_case()
+    expected = _call_legacy_transmission(case)
+    actual = _call_experimental_transmission(case)
 
     assert actual.shape == (case["nwno"],)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)

@@ -772,3 +772,111 @@ def get_reflected_1d_w(
         sym_fac = 1.0
 
     return sym_fac * 0.5 * albedo_sum / F0PI * (cos_theta + 1.0)
+
+
+@nb.experimental.jitclass
+class TransmissionResult:
+    """Persistent transmission-spectrum outputs."""
+
+    nwavelengths: nb.int64
+    wavelength_um: nb.float64[:]
+    rprs2: nb.float64[:]
+
+    def __init__(self):
+        self._allocate(0)
+
+    def _allocate(self, nwavelengths):
+        self.nwavelengths = nwavelengths
+        self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.rprs2 = np.empty(nwavelengths, dtype=np.float64)
+
+    def _ensure(self, nwavelengths):
+        if nwavelengths != self.nwavelengths:
+            self._allocate(nwavelengths)
+
+
+@nb.njit(parallel=True)
+def get_transit_1d(
+    nlevel,
+    nwavelengths_in_chunk,
+    z,
+    dz,
+    rstar,
+    mmw,
+    k_b,
+    amu,
+    player,
+    tlayer,
+    colden,
+    dtau,
+    transit_depth,
+):
+    """Compute transmission spectra for a single atmosphere."""
+
+    for iw in nb.prange(nwavelengths_in_chunk):
+        transit_depth[iw] = get_transit_1d_w(
+            nlevel,
+            z,
+            dz,
+            rstar,
+            mmw,
+            k_b,
+            amu,
+            player,
+            tlayer,
+            colden,
+            dtau[iw, :],
+        )
+
+
+@nb.njit(cache=True)
+def get_transit_1d_w(
+    nlevel,
+    z,
+    dz,
+    rstar,
+    mmw,
+    k_b,
+    amu,
+    player,
+    tlayer,
+    colden,
+    dtau,
+):
+    """Per-wavelength transmission solve used by :func:`get_transit_1d`."""
+
+    nlayer = nlevel - 1
+    mmw_grams = mmw * amu
+    total = 0.0
+    zmin = z[0]
+    for i in range(1, nlevel):
+        if z[i] < zmin:
+            zmin = z[i]
+
+    for i in range(nlevel):
+        tauall = 0.0
+        reference_shell = z[i]
+        for j in range(i):
+            inner_shell = z[i - j]
+            outer_shell = z[i - j - 1]
+            if (inner_shell != reference_shell) and (outer_shell != reference_shell):
+                integrate_segment = (
+                    np.sqrt(outer_shell * outer_shell - reference_shell * reference_shell)
+                    - np.sqrt(inner_shell * inner_shell - reference_shell * reference_shell)
+                )
+            else:
+                integrate_segment = np.sqrt(outer_shell * outer_shell - reference_shell * reference_shell)
+
+            layer_idx = i - j - 1
+            tauall += (
+                2.0
+                * (dtau[layer_idx] / colden[layer_idx] * mmw_grams[layer_idx])
+                * integrate_segment
+                * player[layer_idx]
+                / tlayer[layer_idx]
+                / k_b
+            )
+
+        total += (1.0 - np.exp(-tauall)) * z[i] * dz[i]
+
+    return (zmin / rstar) ** 2.0 + 2.0 / (rstar * rstar) * total

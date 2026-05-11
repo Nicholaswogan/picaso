@@ -21,6 +21,8 @@ from .experimental_fluxes import (
     ReflectedSolver,
     ThermalResult,
     ThermalSolver,
+    TransmissionResult,
+    get_transit_1d,
     get_reflected_1d,
     get_thermal_1d,
 )
@@ -942,7 +944,7 @@ def _fill_molecular_interpolation_workspace(atmosphere, pressure_grid, temperatu
         for it in range(workspace.ntemperature):
             workspace.molecular_pair_map[ip, it] = -1
     for i in range(nlayers):
-        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.layer_pressures[i])
+        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.layer_pressures_cgs[i]/1.0e6)
         it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.layer_temperatures[i])
 
         workspace.molecular_pressure_ind0[i] = _get_or_create_molecular_pair(ip0, it0, workspace)
@@ -1197,7 +1199,7 @@ class RadtranAtmosphere:
 
     species_names: nb.types.ListType(nb.types.unicode_type)
     species_mu: nb.float64[:]
-    level_pressures: nb.float64[:]
+    level_pressures_cgs: nb.float64[:]
     level_temperatures: nb.float64[:]
     level_mixing_ratios: nb.float64[:,:]
     level_mubar: nb.float64[:]
@@ -1206,7 +1208,7 @@ class RadtranAtmosphere:
     level_gravity: nb.float64[:]
     level_scale_height: nb.float64[:]
     level_density: nb.float64[:]
-    layer_pressures: nb.float64[:]
+    layer_pressures_cgs: nb.float64[:]
     layer_temperatures: nb.float64[:]
     layer_mixing_ratios: nb.float64[:,:]
     layer_mubar: nb.float64[:]
@@ -1215,6 +1217,7 @@ class RadtranAtmosphere:
     layer_density: nb.float64[:]
     layer_densities: nb.float64[:,:]
     layer_columns: nb.float64[:,:]
+    layer_colden: nb.float64[:]
     reference_pressure: nb.float64
 
     def __init__(self):
@@ -1234,10 +1237,10 @@ class RadtranAtmosphere:
         self.nspecies = atm.nspecies
         self.species_names = atm.species_names
         self.species_mu[:] = atm.species_mu[:]
-        self.level_pressures[:] = atm.level_pressures[:]
+        self.level_pressures_cgs[:] = atm.level_pressures[:] * 1.0e6
         self.level_temperatures[:] = atm.level_temperatures[:]
         self.level_mixing_ratios[:, :] = atm.level_mixing_ratios[:, :]
-        self.layer_pressures[:] = atm.layer_pressures[:]
+        self.layer_pressures_cgs[:] = atm.layer_pressures[:] * 1.0e6
         self.layer_temperatures[:] = atm.layer_temperatures[:]
         self.layer_mixing_ratios[:, :] = atm.layer_mixing_ratios[:, :]
         self.reference_pressure = atm.reference_pressure
@@ -1260,12 +1263,12 @@ class RadtranAtmosphere:
         # The level grid is anchored at the nearest level pressure to the
         # requested reference pressure, mirroring atmsetup.get_altitude().
         nlevels = self.nlayers + 1
-        p_reference = self.reference_pressure
-        max_pressure = np.max(self.level_pressures)
+        p_reference = self.reference_pressure * 1.0e6
+        max_pressure = np.max(self.level_pressures_cgs)
         if p_reference >= max_pressure:
             p_reference = max_pressure
         else:
-            p_reference = self.level_pressures[self.level_pressures >= p_reference][0]
+            p_reference = self.level_pressures_cgs[self.level_pressures_cgs >= p_reference][0]
 
         planet_radius = self.radius
         planet_mass = self.mass
@@ -1277,9 +1280,10 @@ class RadtranAtmosphere:
         self.level_scale_height[:] = 0.0
         self.level_density[:] = 0.0
         self.layer_dz[:] = 0.0
+        self.layer_colden[:] = 0.0
 
         iref = 0
-        while iref < nlevels and self.level_pressures[iref] < p_reference:
+        while iref < nlevels and self.level_pressures_cgs[iref] < p_reference:
             iref += 1
         if iref == nlevels:
             iref = nlevels - 1
@@ -1287,14 +1291,14 @@ class RadtranAtmosphere:
         for i in range(iref, nlevels - 1):
             gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
             self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
-            delta_logp = np.log(self.level_pressures[i + 1] / self.level_pressures[i])
+            delta_logp = np.log(self.level_pressures_cgs[i + 1] / self.level_pressures_cgs[i])
             self.level_dz[i] = self.level_scale_height[i] * delta_logp
             self.level_z[i + 1] = self.level_z[i] - self.level_dz[i]
 
         for i in range(iref, 0, -1):
             gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
             self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
-            delta_logp = np.log(self.level_pressures[i] / self.level_pressures[i - 1])
+            delta_logp = np.log(self.level_pressures_cgs[i] / self.level_pressures_cgs[i - 1])
             self.level_dz[i] = self.level_scale_height[i] * delta_logp
             self.level_z[i - 1] = self.level_z[i] + self.level_dz[i]
 
@@ -1305,7 +1309,7 @@ class RadtranAtmosphere:
         # Populate the endpoint gravity values.
         for i in range(nlevels):
             self.level_gravity[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
-            self.level_density[i] = (self.level_pressures[i] * 1.0e6) / (KB_CGS * self.level_temperatures[i])
+            self.level_density[i] = self.level_pressures_cgs[i] / (KB_CGS * self.level_temperatures[i])
 
         self.level_scale_height[:] = (
             KB_CGS * self.level_temperatures[:] / (self.level_mubar[:] * AMU_CGS * self.level_gravity[:])
@@ -1317,12 +1321,12 @@ class RadtranAtmosphere:
         # Layer quantities derived from the legacy level grid.
         for i in range(self.nlayers):
             self.layer_dz[i] = self.level_z[i] - self.level_z[i + 1]
-            self.layer_density[i] = (self.layer_pressures[i] * 1.0e6) / (KB_CGS * self.layer_temperatures[i])
-            layer_colden = (self.level_pressures[i + 1] - self.level_pressures[i]) * 1.0e6 / self.layer_gravity[i]
+            self.layer_density[i] = self.layer_pressures_cgs[i] / (KB_CGS * self.layer_temperatures[i])
+            self.layer_colden[i] = (self.level_pressures_cgs[i + 1] - self.level_pressures_cgs[i]) / self.layer_gravity[i]
             for j in range(self.nspecies):
                 self.layer_densities[j, i] = self.layer_mixing_ratios[j, i] * self.layer_density[i]
                 self.layer_columns[j, i] = (
-                    self.layer_mixing_ratios[j, i] * layer_colden / (self.layer_mubar[i] * AMU_CGS)
+                    self.layer_mixing_ratios[j, i] * self.layer_colden[i] / (self.layer_mubar[i] * AMU_CGS)
                 )
 
     def _allocate(self, nlayers, nspecies):
@@ -1333,7 +1337,7 @@ class RadtranAtmosphere:
         self.semimajor = np.nan
         self.species_names = nb.typed.List.empty_list(nb.types.unicode_type)
         self.species_mu = np.empty(nspecies, dtype=np.float64)
-        self.level_pressures = np.empty(nlayers + 1, dtype=np.float64)
+        self.level_pressures_cgs = np.empty(nlayers + 1, dtype=np.float64)
         self.level_temperatures = np.empty(nlayers + 1, dtype=np.float64)
         self.level_mixing_ratios = np.empty((nspecies, nlayers + 1), dtype=np.float64)
         self.level_mubar = np.empty(nlayers + 1, dtype=np.float64)
@@ -1342,7 +1346,7 @@ class RadtranAtmosphere:
         self.level_gravity = np.empty(nlayers + 1, dtype=np.float64)
         self.level_scale_height = np.empty(nlayers + 1, dtype=np.float64)
         self.level_density = np.empty(nlayers + 1, dtype=np.float64)
-        self.layer_pressures = np.empty(nlayers, dtype=np.float64)
+        self.layer_pressures_cgs = np.empty(nlayers, dtype=np.float64)
         self.layer_temperatures = np.empty(nlayers, dtype=np.float64)
         self.layer_mixing_ratios = np.empty((nspecies, nlayers), dtype=np.float64)
         self.layer_mubar = np.empty(nlayers, dtype=np.float64)
@@ -1351,6 +1355,7 @@ class RadtranAtmosphere:
         self.layer_density = np.empty(nlayers, dtype=np.float64)
         self.layer_densities = np.empty((nspecies, nlayers), dtype=np.float64)
         self.layer_columns = np.empty((nspecies, nlayers), dtype=np.float64)
+        self.layer_colden = np.empty(nlayers, dtype=np.float64)
         self.reference_pressure = np.nan
 
     def _ensure(self, nlayers, nspecies):
@@ -1376,7 +1381,7 @@ def _validate_clouds(clouds: Clouds, pressures, wavelength):
                 f"got {clouds.wavelength[i]} and {wavelength[i]}"
             )
     for i in range(clouds.nlayers):
-        if not np.isclose(clouds.pressure[i], pressures[i]):
+        if not np.isclose(clouds.pressure[i] * 1.0e6, pressures[i]):
             raise ValueError(
                 f"cloud pressure grid must match atmosphere pressures at index {i}, "
                 f"got {clouds.pressure[i]} and {pressures[i]}"
@@ -1419,6 +1424,8 @@ class Radtran:
         self.reflected = ReflectedSolver()
         self.reflected_result = ReflectedResult()
 
+        self.transmission_result = TransmissionResult()
+
         # Phase
         if phase_kwargs is None:
             phase_kwargs = {}
@@ -1455,7 +1462,7 @@ class Radtran:
             self.clouds = None
             return
 
-        _validate_clouds(clouds, self.atmosphere.layer_pressures, self.opacities.wavelength)
+        _validate_clouds(clouds, self.atmosphere.layer_pressures_cgs, self.opacities.wavelength)
         self.clouds = clouds
 
     def _setup_surface(self, surface: Surface):
@@ -1524,8 +1531,8 @@ class Radtran:
             self.opacities_result.dtau[:chunk_width, :],
             self.opacities_result.w0[:chunk_width, :],
             self.opacities_result.cosb[:chunk_width, :],
-            self.atmosphere.layer_temperatures,
-            self.atmosphere.layer_pressures,
+            self.atmosphere.level_temperatures,
+            self.atmosphere.level_pressures_cgs,
             self.phase.ubar1,
             self.opacities_result.surf_reflect[:chunk_width],
             self.surface.hard_surface,
@@ -1591,6 +1598,39 @@ class Radtran:
         spectrum *= scale_factor
         self.reflected_result.albedo[ind_wv0:ind_wv1] += spectrum
 
+    def _radiate_transmission(self, ind_wv0, ind_wv1, scale_factor):
+
+        if self.star is None:
+            raise ValueError("transmission requires a star with a finite radius")
+        if not np.isfinite(self.star.radius) or self.star.radius <= 0.0:
+            raise ValueError(
+                f"transmission requires a finite positive stellar radius, got {self.star.radius}"
+            )
+
+        chunk_width = ind_wv1 - ind_wv0
+
+        get_transit_1d(
+            self.atmosphere.nlayers + 1,
+            chunk_width,
+            self.atmosphere.level_z,
+            self.atmosphere.level_dz,
+            self.star.radius,
+            self.atmosphere.layer_mubar,
+            KB_CGS,
+            AMU_CGS,
+            self.atmosphere.level_pressures_cgs,
+            self.atmosphere.level_temperatures,
+            self.atmosphere.layer_colden,
+            self.opacities_result.dtau[:chunk_width, :],
+            self.opacities_result.spectrum[:chunk_width],
+        )
+
+        # Save chunk
+        self.transmission_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        spectrum = self.opacities_result.spectrum[:chunk_width]
+        spectrum *= scale_factor
+        self.transmission_result.rprs2[ind_wv0:ind_wv1] += spectrum
+
     def _zero_result(self, calculation):
         if calculation == 'thermal':
             self.thermal_result._ensure(self.opacities.nwavelength)
@@ -1598,12 +1638,17 @@ class Radtran:
         elif calculation == 'reflected':
             self.reflected_result._ensure(self.opacities.nwavelength)
             self.reflected_result.albedo[:] = 0.0
+        elif calculation == 'transmission':
+            self.transmission_result._ensure(self.opacities.nwavelength)
+            self.transmission_result.rprs2[:] = 0.0
 
     def _radiate(self, ind_wv0, ind_wv1, calculation, scale_factor):
         if calculation == 'thermal':
             self._radiate_thermal(ind_wv0, ind_wv1, scale_factor)
         elif calculation == 'reflected':
             self._radiate_reflected(ind_wv0, ind_wv1, scale_factor)
+        elif calculation == 'transmission':
+            self._radiate_transmission(ind_wv0, ind_wv1, scale_factor)
 
     def _post_process(self, calculation):
         if calculation == 'thermal':
@@ -1618,12 +1663,16 @@ class Radtran:
         elif calculation == 'reflected':
             fpfs_scale = (self.atmosphere.radius / self.atmosphere.semimajor) ** 2.0
             self.reflected_result.fpfs[:] = self.reflected_result.albedo[:] * fpfs_scale
+        elif calculation == 'transmission':
+            pass
             
     def _get_result(self, calculation):
         if calculation == 'thermal':
             return self.thermal_result
         elif calculation == 'reflected':
             return self.reflected_result
+        elif calculation == 'transmission':
+            return self.transmission_result
     
     def spectrum(
         self,
@@ -1636,10 +1685,12 @@ class Radtran:
         nwavelengths_per_chunk=10_000,
     ):
 
-        if calculation not in ['thermal', 'reflected']:
+        if calculation not in ['thermal', 'reflected', 'transmission']:
             raise ValueError(
-                f"calculation must be 'thermal' or 'reflected', got {calculation!r}"
+                f"calculation must be 'thermal', 'reflected', or 'transmission', got {calculation!r}"
             )
+        if calculation == 'transmission' and star is None:
+            raise ValueError("transmission calculations require a Star with a finite radius")
         
         # Set wavelength chunking
         self._set_wavelength_chunks(nwavelengths_per_chunk)
