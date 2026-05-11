@@ -17,8 +17,8 @@ from picaso import optics
 from picaso import fluxes
 from picaso import fluxes_noalloc
 from picaso import experimental
-from picaso import experimental_fluxes
-from picaso import experimental_raman
+from picaso.experimental import fluxes as experimental_fluxes
+from picaso.experimental import raman as experimental_raman
 
 
 def _make_thermal_case():

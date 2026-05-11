@@ -10,12 +10,11 @@ pass.
 """
 
 import numba as nb
-from numba.experimental import jitclass
 from numba import types
 from numba import typed
 import numpy as np
 
-from .fluxes_noalloc import setup_tri_diag_inplace, tri_diag_solve_inplace
+from ..fluxes_noalloc import setup_tri_diag_inplace, tri_diag_solve_inplace
 
 
 @nb.njit(cache=True)

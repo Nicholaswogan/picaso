@@ -14,9 +14,9 @@ import numpy as np
 import numba as nb
 from numba import typed
 
-from .elements import ELEMENTS
-from .disco import compute_disco, get_angles_1d, get_angles_3d
-from .experimental_fluxes import (
+from ..elements import ELEMENTS
+from ..disco import compute_disco, get_angles_1d, get_angles_3d
+from .fluxes import (
     ReflectedResult,
     ReflectedSolver,
     ThermalResult,
@@ -26,9 +26,11 @@ from .experimental_fluxes import (
     get_reflected_1d,
     get_thermal_1d,
 )
-from .experimental_rayleigh import compute_sigma as compute_rayleigh_sigma
-from .experimental_rayleigh import RAYLEIGH_MOLECULES
-from .experimental_raman import compute_raman
+from .rayleigh import (
+    compute_sigma as compute_rayleigh_sigma,
+    RAYLEIGH_MOLECULES,
+)
+from .raman import compute_raman
 
 # cgs constants for the compiled hydrostatic setup
 KB_CGS = 1.380649e-16
