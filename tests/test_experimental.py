@@ -13,10 +13,12 @@ sys.path.insert(0, str(REPO_ROOT))
 from picaso import disco
 from picaso import atmsetup
 from picaso import justdoit as jdi
+from picaso import optics
 from picaso import fluxes
 from picaso import fluxes_noalloc
 from picaso import experimental
 from picaso import experimental_fluxes
+from picaso import experimental_raman
 
 
 def _make_thermal_case():
@@ -654,3 +656,17 @@ def test_experimental_transmission_toa_parity():
 
     assert actual.shape == (case["nwno"],)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_raman_mode_1_parity_with_legacy_pollack():
+    wavelength = np.array(
+        [0.25, 0.3, 0.355, 0.5123, 0.7777, 0.9818, 1.05],
+        dtype=np.float64,
+    )
+    actual = np.empty_like(wavelength)
+    experimental_raman.compute_raman(1, wavelength, actual)
+
+    expected = optics.raman_pollack(2, wavelength)[0]
+
+    assert actual.shape == wavelength.shape
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-15)
