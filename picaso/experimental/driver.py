@@ -247,7 +247,9 @@ class Clouds:
     fthin_cld: nb.float64
     fhole: nb.float64
 
-    def __init__(self, wavelength, pressure, opd, w0, g0, do_holes=False, fthin_cld=1.0, fhole=0.0):
+    interpolate: nb.bool
+
+    def __init__(self, wavelength, pressure, opd, w0, g0, do_holes=False, fthin_cld=1.0, fhole=0.0, interpolate=True):
         
         # Check shape
         nwavelengths = len(wavelength)
@@ -297,6 +299,8 @@ class Clouds:
         self.do_holes = do_holes
         self.fthin_cld = fthin_cld
         self.fhole = fhole
+
+        self.interpolate = interpolate
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +495,7 @@ class RadtranOpacitiesWorkspace:
     npressure: nb.int64
     ntemperature: nb.int64
     ncontinuum_temperature: nb.int64
+    nwavelengths: nb.int64
     nwavelengths_per_chunk: nb.int64
     molecular_npairs: nb.int64
     continuum_nrows: nb.int64
@@ -516,15 +521,27 @@ class RadtranOpacitiesWorkspace:
     continuum_raw_u16: nb.uint16[:]
     continuum_raw_f32: nb.float32[:]
     rayleigh_sigma: nb.float64[:]
+    cloud_wavelength_ind0: nb.int64[:]
+    cloud_wavelength_ind1: nb.int64[:]
+    cloud_wavelength_weight: nb.float64[:]
 
     def __init__(self):
-        self._allocate(0, 0, 0, 0, 0)
+        self._allocate(0, 0, 0, 0, 0, 0)
 
-    def _allocate(self, nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk):
+    def _allocate(
+        self,
+        nlayers,
+        npressure,
+        ntemperature,
+        ncontinuum_temperature,
+        nwavelengths,
+        nwavelengths_per_chunk,
+    ):
         self.nlayers = nlayers
         self.npressure = npressure
         self.ntemperature = ntemperature
         self.ncontinuum_temperature = ncontinuum_temperature
+        self.nwavelengths = nwavelengths
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
         self.molecular_npairs = 0
         self.continuum_nrows = 0
@@ -550,16 +567,35 @@ class RadtranOpacitiesWorkspace:
         self.continuum_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
         self.continuum_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
         self.rayleigh_sigma = np.empty(nwavelengths_per_chunk, dtype=np.float64)
+        self.cloud_wavelength_ind0 = np.empty(nwavelengths, dtype=np.int64)
+        self.cloud_wavelength_ind1 = np.empty(nwavelengths, dtype=np.int64)
+        self.cloud_wavelength_weight = np.empty(nwavelengths, dtype=np.float64)
 
-    def _ensure(self, nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk):
+    def _ensure(
+        self,
+        nlayers,
+        npressure,
+        ntemperature,
+        ncontinuum_temperature,
+        nwavelengths,
+        nwavelengths_per_chunk,
+    ):
         if (
             nlayers != self.nlayers
             or npressure != self.npressure
             or ntemperature != self.ntemperature
             or ncontinuum_temperature != self.ncontinuum_temperature
+            or nwavelengths != self.nwavelengths
             or nwavelengths_per_chunk != self.nwavelengths_per_chunk
         ):
-            self._allocate(nlayers, npressure, ntemperature, ncontinuum_temperature, nwavelengths_per_chunk)
+            self._allocate(
+                nlayers,
+                npressure,
+                ntemperature,
+                ncontinuum_temperature,
+                nwavelengths,
+                nwavelengths_per_chunk,
+            )
 
 class RadtranOpacities:
 
@@ -664,12 +700,25 @@ class RadtranOpacities:
 
         self.workspace = RadtranOpacitiesWorkspace()
 
-    def prepare_interpolation(self, atmosphere: RadtranAtmosphere, nwavelengths_per_chunk: int):
+    def _prepare_cloud_interpolation(self, clouds: Clouds):
+        if clouds is None or not clouds.interpolate:
+            return
+
+        _fill_cloud_interpolation_workspace(
+            clouds.wavelength,
+            self.wavelength,
+            self.workspace.cloud_wavelength_ind0,
+            self.workspace.cloud_wavelength_ind1,
+            self.workspace.cloud_wavelength_weight,
+        )
+
+    def prepare_interpolation(self, atmosphere: RadtranAtmosphere, clouds: Clouds, nwavelengths_per_chunk: int):
         self.workspace._ensure(
             atmosphere.nlayers,
             self.npressure,
             self.ntemperature,
             self.ncontinuum_temperature,
+            self.nwavelength,
             nwavelengths_per_chunk,
         )
 
@@ -684,6 +733,7 @@ class RadtranOpacities:
             self.continuum_temperatures,
             self.workspace,
         )
+        self._prepare_cloud_interpolation(clouds)
 
     def _read_and_decode_opacity_row(
         self,
@@ -844,10 +894,19 @@ class RadtranOpacities:
         taucld = opacities_result.taucld[:chunk_width, :]
         w0_cld = opacities_result.w0_cld[:chunk_width, :]
         g0_cld = opacities_result.g0_cld[:chunk_width, :]
+        
         if clouds is not None:
-            taucld[:,:] = clouds.opd[ind_wv0:ind_wv1,:]
-            w0_cld[:,:] = clouds.w0[ind_wv0:ind_wv1,:]
-            g0_cld[:,:] = clouds.g0[ind_wv0:ind_wv1,:]
+            _set_clouds(
+                clouds,
+                ind_wv0,
+                ind_wv1,
+                taucld,
+                w0_cld,
+                g0_cld,
+                self.workspace.cloud_wavelength_ind0[ind_wv0:ind_wv1],
+                self.workspace.cloud_wavelength_ind1[ind_wv0:ind_wv1],
+                self.workspace.cloud_wavelength_weight[ind_wv0:ind_wv1],
+            )
         else:
             taucld[:,:] = 0.0
             w0_cld[:,:] = 0.0
@@ -1033,6 +1092,49 @@ def _accumulate_rayleigh_tau(sigma_row, columns_row, tau_out):
         sigma = sigma_row[iw]
         for i in range(nlayers):
             tau_out[iw, i] += sigma * (columns_row[i] / AVOGADRO)
+
+@nb.njit
+def _fill_cloud_interpolation_workspace(source_wavelength, target_wavelength, ind0, ind1, weight):
+    for i in range(target_wavelength.shape[0]):
+        lo, hi, w = _bracket_1d(source_wavelength, target_wavelength[i])
+        ind0[i] = lo
+        ind1[i] = hi
+        weight[i] = w
+
+
+@nb.njit
+def _set_clouds(
+    clouds,
+    ind_wv0,
+    ind_wv1,
+    taucld,
+    w0_cld,
+    g0_cld,
+    cloud_ind0,
+    cloud_ind1,
+    cloud_weight,
+):
+    if not clouds.interpolate:
+        taucld[:, :] = clouds.opd[ind_wv0:ind_wv1, :]
+        w0_cld[:, :] = clouds.w0[ind_wv0:ind_wv1, :]
+        g0_cld[:, :] = clouds.g0[ind_wv0:ind_wv1, :]
+        return
+
+    # Interpolate the clouds in wavelength only. Pressure is already aligned.
+    chunk_width = ind_wv1 - ind_wv0
+    nlayers = clouds.nlayers
+
+    for iw in range(chunk_width):
+        lo = cloud_ind0[iw]
+        hi = cloud_ind1[iw]
+        weight = cloud_weight[iw]
+        c0 = 1.0 - weight
+        c1 = weight
+        for il in range(nlayers):
+            taucld[iw, il] = c0 * clouds.opd[lo, il] + c1 * clouds.opd[hi, il]
+            w0_cld[iw, il] = c0 * clouds.w0[lo, il] + c1 * clouds.w0[hi, il]
+            g0_cld[iw, il] = c0 * clouds.g0[lo, il] + c1 * clouds.g0[hi, il]
+
 
 @nb.njit
 def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream, delta_eddington, fthin_cld):
@@ -1366,26 +1468,41 @@ class RadtranAtmosphere:
 @nb.njit
 def _validate_clouds(clouds: Clouds, pressures, wavelength):
 
-    if clouds.nwavelengths != len(wavelength):
-        raise ValueError(
-            f"clouds.nwavelengths must match len(wavelength), got {clouds.nwavelengths} and {len(wavelength)}"
-        )
     if clouds.nlayers != len(pressures):
         raise ValueError(
             f"clouds.nlayers must match len(pressures), got {clouds.nlayers} and {len(pressures)}"
         )
-    for i in range(clouds.nwavelengths):
-        if not np.isclose(clouds.wavelength[i], wavelength[i]):
-            raise ValueError(
-                f"cloud wavelength grid must match opacity wavelength grid at index {i}, "
-                f"got {clouds.wavelength[i]} and {wavelength[i]}"
-            )
     for i in range(clouds.nlayers):
         if not np.isclose(clouds.pressure[i] * 1.0e6, pressures[i]):
             raise ValueError(
                 f"cloud pressure grid must match atmosphere pressures at index {i}, "
                 f"got {clouds.pressure[i]} and {pressures[i]}"
             )
+
+    # If we are going to interpolate, then return
+    if clouds.interpolate:
+        for i in range(clouds.nwavelengths):
+            if not np.isfinite(clouds.wavelength[i]):
+                raise ValueError(
+                    f"cloud wavelength grid must contain only finite values, got {clouds.wavelength[i]} at index {i}"
+                )
+        for i in range(clouds.nwavelengths - 1):
+            if clouds.wavelength[i+1] <= clouds.wavelength[i]:
+                raise ValueError(
+                    "cloud wavelength grid must be strictly increasing when interpolate=True, "
+                    f"got {clouds.wavelength[i+1]} <= {clouds.wavelength[i]} at indices {i+1} and {i}"
+                )
+    else:
+        if clouds.nwavelengths != len(wavelength):
+            raise ValueError(
+                f"clouds.nwavelengths must match len(wavelength), got {clouds.nwavelengths} and {len(wavelength)}"
+            )
+        for i in range(clouds.nwavelengths):
+            if not np.isclose(clouds.wavelength[i], wavelength[i]):
+                raise ValueError(
+                    f"cloud wavelength grid must match opacity wavelength grid at index {i}, "
+                    f"got {clouds.wavelength[i]} and {wavelength[i]}"
+                )
 
 @nb.njit
 def _validate_wavelength(wavelength1, wavelength2):
@@ -1496,7 +1613,7 @@ class Radtran:
 
     def _prepare_interpolation(self):
         "Prepared interpolation for computing opacities"
-        self.opacities.prepare_interpolation(self.atmosphere, self.nwavelengths_per_chunk)
+        self.opacities.prepare_interpolation(self.atmosphere, self.clouds, self.nwavelengths_per_chunk)
 
     def _compute_opacity(self, ind_wv0, ind_wv1):
         "Compute the opacity of the atmosphere."
