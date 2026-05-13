@@ -42,6 +42,7 @@ R_SUN_CGS = 6.957e10
 CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
 # Convert number column density to molar column density for legacy Rayleigh parity.
 AVOGADRO = 6.02214076e23
+LOG10 = np.log(10.0)
 
 
 def separate_molecule_name(molecule_name):
@@ -951,6 +952,11 @@ class RadtranOpacities:
             pass
 
 
+@nb.njit(nb.float64(nb.float64), fastmath=True, inline="always")
+def fast_pow10(x):
+    return np.exp(LOG10 * x)
+
+
 @nb.njit
 def _bracket_1d(grid, value):
     ngrid = grid.shape[0]
@@ -1063,7 +1069,7 @@ def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_in
                 + c01 * block[i01, iw]
                 + c11 * block[i11, iw]
             )
-            tau_out[iw, i] += (10.0 ** log_opacity) * column
+            tau_out[iw, i] += fast_pow10(log_opacity) * column
 
 
 @nb.njit
@@ -1080,7 +1086,7 @@ def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, ta
         c1 = tw
         for iw in range(nwavelengths):
             log_opacity = c0 * block[it0, iw] + c1 * block[it1, iw]
-            tau_out[iw, i] += (10.0 ** log_opacity) * scale
+            tau_out[iw, i] += fast_pow10(log_opacity) * scale
 
 
 @nb.njit
