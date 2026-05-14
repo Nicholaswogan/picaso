@@ -10,6 +10,7 @@ from .optics import RetrieveOpacities, RetrieveOpacitiesHDF5, compute_opacity, R
 from .disco import get_angles_1d, get_angles_3d, compute_disco, compress_disco, compress_thermal
 from .justplotit import numba_cumsum, mean_regrid
 from .build_3d_input import regrid_xarray
+from .experimental import interface
 
 
 from virga import justdoit as vj
@@ -131,6 +132,16 @@ def picaso(bundle,opacityclass, dimension = '1d',calculation='reflected',
     ------
     dictionary with albedos or fluxes or both (depending on what calculation type)
     """
+    if isinstance(opacityclass, interface.ExperimentalRT):
+        return interface.picaso(
+            bundle,
+            opacityclass, 
+            dimension,
+            calculation, 
+            full_output, 
+            plot_opacity, 
+            as_dict
+        )
     inputs = bundle.inputs
 
     wno = opacityclass.wno
