@@ -554,7 +554,7 @@ def get_reflected_1d(
             b_top,
         )
 
-@nb.njit(cache=True)
+@nb.njit
 def get_reflected_1d_w(
     wrk,
     nlevel,
@@ -828,7 +828,7 @@ def get_transit_1d(
         )
 
 
-@nb.njit(cache=True)
+@nb.njit
 def get_transit_1d_w(
     nlevel,
     z,
