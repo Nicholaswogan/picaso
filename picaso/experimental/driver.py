@@ -1162,7 +1162,6 @@ def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream,
 
             # Apply thinning to cloud
             taucld *= fthin_cld
-            g0_cld *= fthin_cld
 
             # Total opacity
             dtau = taugas + tauray + taucld
