@@ -8,6 +8,7 @@ from pathlib import Path
 import io
 import sqlite3
 import re
+from collections import OrderedDict
 
 import h5py
 import numpy as np
@@ -521,6 +522,8 @@ class RadtranOpacitiesWorkspace:
     molecular_raw_f32: nb.float32[:]
     continuum_raw_u16: nb.uint16[:]
     continuum_raw_f32: nb.float32[:]
+    raw_full_u16: nb.uint16[:]
+    raw_full_f32: nb.float32[:]
     rayleigh_sigma: nb.float64[:]
     cloud_wavelength_ind0: nb.int64[:]
     cloud_wavelength_ind1: nb.int64[:]
@@ -567,6 +570,8 @@ class RadtranOpacitiesWorkspace:
         self.molecular_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
         self.continuum_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
         self.continuum_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
+        self.raw_full_u16 = np.empty(nwavelengths, dtype=np.uint16)
+        self.raw_full_f32 = np.empty(nwavelengths, dtype=np.float32)
         self.rayleigh_sigma = np.empty(nwavelengths_per_chunk, dtype=np.float64)
         self.cloud_wavelength_ind0 = np.empty(nwavelengths, dtype=np.int64)
         self.cloud_wavelength_ind1 = np.empty(nwavelengths, dtype=np.int64)
@@ -598,9 +603,52 @@ class RadtranOpacitiesWorkspace:
                 nwavelengths_per_chunk,
             )
 
+
+class RadtranOpacitiesCache:
+    def __init__(self, size_limit_bytes, row_length, raw_dtype):
+        self.size_limit_bytes = int(size_limit_bytes)
+        self.row_length = int(row_length)
+        self.raw_dtype = np.dtype(raw_dtype)
+        self.row_nbytes = int(self.row_length * self.raw_dtype.itemsize)
+        self.capacity = 0 if self.row_nbytes <= 0 else int(self.size_limit_bytes // self.row_nbytes)
+        self.entries = OrderedDict()
+        self.current_size_bytes = 0
+        self.pool = None
+        self.free_slots = []
+
+        if self.capacity > 0:
+            self.pool = np.empty((self.capacity, self.row_length), dtype=self.raw_dtype)
+            self.free_slots = list(range(self.capacity - 1, -1, -1))
+
+    def get(self, key):
+        slot = self.entries.get(key)
+        if slot is None:
+            return None
+        self.entries.move_to_end(key)
+        return self.pool[slot]
+
+    def put(self, key, value):
+        if self.capacity <= 0:
+            return
+
+        if key in self.entries:
+            slot = self.entries[key]
+        else:
+            if self.free_slots:
+                slot = self.free_slots.pop()
+            else:
+                _, slot = self.entries.popitem(last=False)
+
+        self.pool[slot, :] = value
+        self.entries[key] = slot
+        self.entries.move_to_end(key)
+        self.current_size_bytes = len(self.entries) * self.row_nbytes
+        return self.pool[slot]
+
+
 class RadtranOpacities:
 
-    def __init__(self, opacity_filename, wavelength_range=None):
+    def __init__(self, opacity_filename, wavelength_range, opacity_cache_size_limit):
 
         if not isinstance(opacity_filename, (str, Path)):
             raise TypeError(
@@ -700,6 +748,11 @@ class RadtranOpacities:
         self.continuum_temperatures.flags.writeable = False
 
         self.workspace = RadtranOpacitiesWorkspace()
+        if opacity_cache_size_limit is None:
+            self.cache = None
+        else:
+            cache_dtype = np.uint16 if self.storage_format == "log10_uint16" else np.float32
+            self.cache = RadtranOpacitiesCache(opacity_cache_size_limit, self.nwavelength, cache_dtype)
 
     def _prepare_cloud_interpolation(self, clouds: Clouds):
         if clouds is None or not clouds.interpolate:
@@ -763,6 +816,147 @@ class RadtranOpacities:
             out_row[:] = raw_out
         out_row += post_decode_log10_factor
 
+    def _read_and_decode_opacity_row_cached(
+        self,
+        dataset,
+        source_sel,
+        source_slice,
+        cache_key,
+        storage_code,
+        y_min,
+        y_max,
+        post_decode_log10_factor,
+        raw_full_buffer,
+        out_row,
+    ):
+        raw_row = self.cache.get(cache_key)
+        if raw_row is None:
+            dataset.read_direct(
+                raw_full_buffer,
+                source_sel=source_sel,
+                dest_sel=np.s_[: raw_full_buffer.shape[0]],
+            )
+            raw_row = raw_full_buffer
+            self.cache.put(cache_key, raw_row)
+
+        raw_view = raw_row[source_slice]
+        if storage_code == 0:
+            if y_max == y_min:
+                out_row[:] = y_min
+            else:
+                out_row[:] = raw_view
+                out_row *= (y_max - y_min) / np.iinfo(np.uint16).max
+                out_row += y_min
+        else:
+            out_row[:] = raw_view
+        out_row += post_decode_log10_factor
+
+    def _read_and_decode_opacity(
+        self,
+        dataset,
+        source_sel,
+        cache_key,
+        storage_code,
+        y_min,
+        y_max,
+        post_decode_log10_factor,
+        raw_chunk_buffer,
+        raw_full_buffer,
+        out_row,
+        source_slice=None,
+    ):
+        if self.cache is None:
+            self._read_and_decode_opacity_row(
+                dataset,
+                source_sel,
+                storage_code,
+                y_min,
+                y_max,
+                post_decode_log10_factor,
+                raw_chunk_buffer,
+                out_row,
+            )
+        else:
+            if source_slice is None:
+                raise ValueError("source_slice must be provided when opacity caching is enabled")
+            self._read_and_decode_opacity_row_cached(
+                dataset,
+                source_sel,
+                source_slice,
+                cache_key,
+                storage_code,
+                y_min,
+                y_max,
+                post_decode_log10_factor,
+                raw_full_buffer,
+                out_row,
+            )
+
+    def _load_molecular_block(
+        self,
+        dataset,
+        species_name,
+        i_molecular,
+        source_wv0,
+        source_wv1,
+        full_source_sel,
+        source_slice,
+        chunk_width,
+        storage_code,
+        molecular_raw_buffer,
+        molecular_full_raw_buffer,
+        block,
+    ):
+        source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
+        for row_id in range(self.workspace.molecular_npairs):
+            ip = self.workspace.molecular_pair_pindex[row_id]
+            it = self.workspace.molecular_pair_tindex[row_id]
+            self._read_and_decode_opacity(
+                dataset,
+                np.s_[ip, it, source_sel],
+                (dataset.name, ip, it),
+                storage_code,
+                self.molecular_y_min[i_molecular],
+                self.molecular_y_max[i_molecular],
+                0.0,
+                molecular_raw_buffer[:chunk_width],
+                molecular_full_raw_buffer,
+                block[row_id, :chunk_width],
+                source_slice=source_slice,
+            )
+
+    def _load_continuum_block(
+        self,
+        dataset,
+        continuum_name,
+        i_continuum,
+        source_wv0,
+        source_wv1,
+        full_source_sel,
+        source_slice,
+        chunk_width,
+        storage_code,
+        continuum_raw_buffer,
+        continuum_full_raw_buffer,
+        block,
+    ):
+        source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
+        for row_id in range(self.workspace.continuum_nrows):
+            it = self.workspace.continuum_temperature_load_idx[row_id]
+            self._read_and_decode_opacity(
+                dataset,
+                np.s_[it, source_sel],
+                (dataset.name, it),
+                storage_code,
+                self.continuum_y_min[i_continuum],
+                self.continuum_y_max[i_continuum],
+                np.log10(CIA_AMAGAT_TO_MOLECULE_CM),
+                continuum_raw_buffer[:chunk_width],
+                continuum_full_raw_buffer,
+                block[row_id, :chunk_width],
+                source_slice=source_slice,
+            )
+
     def compute_opacity(
         self, 
         atmosphere: RadtranAtmosphere, 
@@ -779,9 +973,13 @@ class RadtranOpacities:
         if storage_code == 0:
             molecular_raw_buffer = self.workspace.molecular_raw_u16
             continuum_raw_buffer = self.workspace.continuum_raw_u16
+            molecular_full_raw_buffer = self.workspace.raw_full_u16
+            continuum_full_raw_buffer = self.workspace.raw_full_u16
         else:
             molecular_raw_buffer = self.workspace.molecular_raw_f32
             continuum_raw_buffer = self.workspace.continuum_raw_f32
+            molecular_full_raw_buffer = self.workspace.raw_full_f32
+            continuum_full_raw_buffer = self.workspace.raw_full_f32
 
         # wavelengths and surface
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
@@ -795,6 +993,8 @@ class RadtranOpacities:
         taugas[:] = 0.0
         source_wv0 = self.wavelength_source_indices[ind_wv0]
         source_wv1 = self.wavelength_source_indices[ind_wv1 - 1] + 1
+        full_source_sel = np.s_[self.wavelength_source_indices[0]: self.wavelength_source_indices[-1] + 1]
+        source_slice = slice(ind_wv0, ind_wv1)
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
@@ -803,19 +1003,20 @@ class RadtranOpacities:
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
             dataset = self._molecular_group[species_name]
-            for row_id in range(self.workspace.molecular_npairs):
-                ip = self.workspace.molecular_pair_pindex[row_id]
-                it = self.workspace.molecular_pair_tindex[row_id]
-                self._read_and_decode_opacity_row(
-                    dataset,
-                    np.s_[ip, it, source_wv0:source_wv1],
-                    storage_code,
-                    self.molecular_y_min[i_molecular],
-                    self.molecular_y_max[i_molecular],
-                    0.0,
-                    molecular_raw_buffer[:chunk_width],
-                    block[row_id, :chunk_width],
-                )
+            self._load_molecular_block(
+                dataset,
+                species_name,
+                i_molecular,
+                source_wv0,
+                source_wv1,
+                full_source_sel,
+                source_slice,
+                chunk_width,
+                storage_code,
+                molecular_raw_buffer,
+                molecular_full_raw_buffer,
+                block,
+            )
             _accumulate_molecular_tau(
                 block[:self.workspace.molecular_npairs, :chunk_width],
                 atmosphere.layer_columns[i_species],
@@ -849,19 +1050,20 @@ class RadtranOpacities:
                 i_right,
                 self.workspace,
             )
-            for row_id in range(self.workspace.continuum_nrows):
-                it = self.workspace.continuum_temperature_load_idx[row_id]
-                self._read_and_decode_opacity_row(
-                    dataset,
-                    np.s_[it, source_wv0:source_wv1],
-                    storage_code,
-                    self.continuum_y_min[i_continuum],
-                    self.continuum_y_max[i_continuum],
-                    np.log10(CIA_AMAGAT_TO_MOLECULE_CM),
-                    continuum_raw_buffer[:chunk_width],
-                    block[row_id, :chunk_width],
-                )
-
+            self._load_continuum_block(
+                dataset,
+                continuum_name,
+                i_continuum,
+                source_wv0,
+                source_wv1,
+                full_source_sel,
+                source_slice,
+                chunk_width,
+                storage_code,
+                continuum_raw_buffer,
+                continuum_full_raw_buffer,
+                block,
+            )
             _accumulate_cia_tau(
                 block[:self.workspace.continuum_nrows, :chunk_width],
                 self.workspace.cia_scale,
@@ -1527,10 +1729,11 @@ class Radtran:
         wavelength_range=None,
         settings_kwargs=None,
         phase_kwargs=None,
+        opacity_cache_size_limit=None,
     ):
 
         # Opacities
-        self.opacities = RadtranOpacities(opacity_filename, wavelength_range=wavelength_range)
+        self.opacities = RadtranOpacities(opacity_filename, wavelength_range, opacity_cache_size_limit)
         self.opacities_result = RadtranOpacitiesResult()
 
         # Atmosphere

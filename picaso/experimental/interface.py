@@ -5,8 +5,18 @@ from . import driver
 
 class ExperimentalRT:
 
-    def __init__(self, opacity_filename, wavelength_range, nwavelengths_per_chunk):
-        self.rad = driver.Radtran(opacity_filename, wavelength_range)
+    def __init__(
+        self, 
+        opacity_filename, 
+        wavelength_range, 
+        nwavelengths_per_chunk, 
+        opacity_cache_size_limit,
+    ):
+        self.rad = driver.Radtran(
+            opacity_filename, 
+            wavelength_range, 
+            opacity_cache_size_limit=opacity_cache_size_limit
+        )
         self.wno = 1.0e4/self.rad.opacities.wavelength[::-1]
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
 
@@ -21,6 +31,7 @@ def opannection(
     query_method='linear',
     verbose=False,
     nwavelengths_per_chunk=10_000,
+    opacity_cache_size_limit=None,
 ):
 
     # Initial checks
@@ -39,6 +50,7 @@ def opannection(
         opacity_filename=filename_db,
         wavelength_range=wave_range,
         nwavelengths_per_chunk=nwavelengths_per_chunk,
+        opacity_cache_size_limit=opacity_cache_size_limit,
     )
 
     return opa
