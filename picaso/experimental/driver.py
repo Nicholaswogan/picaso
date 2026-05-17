@@ -611,16 +611,17 @@ class RadtranOpacitiesCache:
         self.raw_dtype = np.dtype(raw_dtype)
         self.row_nbytes = int(self.row_length * self.raw_dtype.itemsize)
         self.capacity = 0 if self.row_nbytes <= 0 else int(self.size_limit_bytes // self.row_nbytes)
+        if self.capacity <= 0:
+            raise ValueError(
+                "opacity_cache_size_limit is too small to cache even one row; "
+                f"need at least {self.row_nbytes} bytes for capacity > 0, got {self.size_limit_bytes}"
+            )
         self.entries = OrderedDict()
-        self.current_size_bytes = 0
-        self.pool = None
-        self.free_slots = []
-
-        if self.capacity > 0:
-            self.pool = np.empty((self.capacity, self.row_length), dtype=self.raw_dtype)
-            self.free_slots = list(range(self.capacity - 1, -1, -1))
+        self.pool = np.empty((self.capacity, self.row_length), dtype=self.raw_dtype)
+        self.free_slots = list(range(self.capacity - 1, -1, -1))
 
     def get(self, key):
+        """Get cached data for `key`, or `None` if the key is absent."""
         slot = self.entries.get(key)
         if slot is None:
             return None
@@ -628,22 +629,19 @@ class RadtranOpacitiesCache:
         return self.pool[slot]
 
     def put(self, key, value):
-        if self.capacity <= 0:
+        """Insert `value` under `key`, updating LRU recency."""
+        if key in self.entries:
+            self.entries.move_to_end(key)
             return
 
-        if key in self.entries:
-            slot = self.entries[key]
+        if self.free_slots:
+            slot = self.free_slots.pop()
         else:
-            if self.free_slots:
-                slot = self.free_slots.pop()
-            else:
-                _, slot = self.entries.popitem(last=False)
+            _, slot = self.entries.popitem(last=False)
 
         self.pool[slot, :] = value
         self.entries[key] = slot
         self.entries.move_to_end(key)
-        self.current_size_bytes = len(self.entries) * self.row_nbytes
-        return self.pool[slot]
 
 
 class RadtranOpacities:
