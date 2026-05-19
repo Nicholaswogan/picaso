@@ -1330,6 +1330,7 @@ def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream,
         running_tau_dedd = 0.0
         result.tau[iw, 0] = 0.0
         result.tau_dedd[iw, 0] = 0.0
+        raman_factor = result.raman_factor[iw]
 
         for i in range(result.nlayers):
             # Unpack to scalars
@@ -1338,7 +1339,6 @@ def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream,
             taucld = result.taucld[iw,i]
             w0_cld = result.w0_cld[iw,i]
             g0_cld = result.g0_cld[iw,i]
-            raman_factor = result.raman_factor[iw]
 
             # Apply thinning to cloud
             taucld *= fthin_cld
