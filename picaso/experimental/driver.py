@@ -1007,6 +1007,10 @@ class RadtranOpacities:
         source_slice = slice(ind_wv0, ind_wv1)
         source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
 
+        # Counters
+        nmolecular_active = 0
+        ncontinuum_active = 0
+
         #~~ Molecular opacities ~~#
         taugas = opacities_result.taugas[:chunk_width, :]
         taugas[:] = 0.0
@@ -1040,6 +1044,8 @@ class RadtranOpacities:
                 self.workspace.molecular_temperature_weight,
                 taugas,
             )
+
+            nmolecular_active += 1
 
         #~~ CIA & continuum ~~#
         atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
@@ -1079,6 +1085,23 @@ class RadtranOpacities:
                 self.workspace.continuum_temperature_weight,
                 taugas,
             )
+
+            ncontinuum_active += 1
+
+        # Check to make sure the cache is big enough to be useful.
+        if self.cache is not None:
+            max_molecular_npairs = min(4 * atmosphere.nlayers, self.npressure * self.ntemperature)
+            max_continuum_npairs = min(2 * atmosphere.nlayers, self.ncontinuum_temperature)
+            min_cache_capacity = nmolecular_active*max_molecular_npairs
+            min_cache_capacity += ncontinuum_active*max_continuum_npairs
+            if self.cache.capacity < min_cache_capacity:
+                min_cache_size = min_cache_capacity * self.cache.row_nbytes
+                raise ValueError(
+                    "opacity_cache_size_limit is too small for the active opacity working set; "
+                    f"need at least {min_cache_size} bytes to cache {min_cache_capacity} rows "
+                    f"of {self.cache.row_nbytes} bytes each, got {self.cache.size_limit_bytes} bytes "
+                    f"(capacity {self.cache.capacity} rows)"
+                )
 
         #~~ Rayleigh ~~#
         tauray = opacities_result.tauray[:chunk_width, :]
