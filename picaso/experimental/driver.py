@@ -424,8 +424,35 @@ class RadtranSettings:
     raman: int = 1
 
     def __post_init__(self):
-        if self.raman not in (1, 2):
-            raise ValueError(f"raman must be 1 or 2, got {self.raman}")
+        def _check_int(name, value, allowed):
+            if not isinstance(value, (int, np.integer)) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer, got {value!r}")
+            if int(value) not in allowed:
+                raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value}")
+
+        def _check_finite(name, value):
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite, got {value}")
+
+        _check_int("single_phase", self.single_phase, {0, 1, 2, 3})
+        _check_int("multi_phase", self.multi_phase, {0, 1})
+        _check_int("toon_coefficients", self.toon_coefficients, {0, 1})
+        _check_int("raman", self.raman, {1, 2})
+
+        for name, value in (
+            ("frac_a", self.frac_a),
+            ("frac_b", self.frac_b),
+            ("frac_c", self.frac_c),
+            ("constant_back", self.constant_back),
+            ("constant_forward", self.constant_forward),
+            ("stream", self.stream),
+        ):
+            _check_finite(name, value)
+
+        if self.stream <= 0.0:
+            raise ValueError(f"stream must be > 0, got {self.stream}")
+        if not isinstance(self.delta_eddington, bool):
+            raise ValueError(f"delta_eddington must be a bool, got {self.delta_eddington!r}")
 
 @dataclass
 class RadtranPhase:
