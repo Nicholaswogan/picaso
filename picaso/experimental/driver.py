@@ -849,6 +849,7 @@ class RadtranOpacities:
         self,
         dataset,
         source_sel,
+        source_slice,
         cache_key,
         storage_code,
         y_min,
@@ -857,7 +858,6 @@ class RadtranOpacities:
         raw_chunk_buffer,
         raw_full_buffer,
         out_row,
-        source_slice=None,
     ):
         if self.cache is None:
             self._read_and_decode_opacity_row(
@@ -871,8 +871,6 @@ class RadtranOpacities:
                 out_row,
             )
         else:
-            if source_slice is None:
-                raise ValueError("source_slice must be provided when opacity caching is enabled")
             self._read_and_decode_opacity_row_cached(
                 dataset,
                 source_sel,
@@ -889,11 +887,8 @@ class RadtranOpacities:
     def _load_molecular_block(
         self,
         dataset,
-        species_name,
         i_molecular,
-        source_wv0,
-        source_wv1,
-        full_source_sel,
+        source_sel,
         source_slice,
         chunk_width,
         storage_code,
@@ -901,13 +896,13 @@ class RadtranOpacities:
         raw_full_buffer,
         block,
     ):
-        source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
         for row_id in range(self.workspace.molecular_npairs):
             ip = self.workspace.molecular_pair_pindex[row_id]
             it = self.workspace.molecular_pair_tindex[row_id]
             self._read_and_decode_opacity(
                 dataset,
                 np.s_[ip, it, source_sel],
+                source_slice,
                 (dataset.name, ip, it),
                 storage_code,
                 self.molecular_y_min[i_molecular],
@@ -916,17 +911,13 @@ class RadtranOpacities:
                 raw_buffer[:chunk_width],
                 raw_full_buffer,
                 block[row_id, :chunk_width],
-                source_slice=source_slice,
             )
 
     def _load_continuum_block(
         self,
         dataset,
-        continuum_name,
         i_continuum,
-        source_wv0,
-        source_wv1,
-        full_source_sel,
+        source_sel,
         source_slice,
         chunk_width,
         storage_code,
@@ -934,12 +925,12 @@ class RadtranOpacities:
         raw_full_buffer,
         block,
     ):
-        source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
         for row_id in range(self.workspace.continuum_nrows):
             it = self.workspace.continuum_temperature_load_idx[row_id]
             self._read_and_decode_opacity(
                 dataset,
                 np.s_[it, source_sel],
+                source_slice,
                 (dataset.name, it),
                 storage_code,
                 self.continuum_y_min[i_continuum],
@@ -948,7 +939,6 @@ class RadtranOpacities:
                 raw_buffer[:chunk_width],
                 raw_full_buffer,
                 block[row_id, :chunk_width],
-                source_slice=source_slice,
             )
 
     def compute_opacity(
@@ -960,9 +950,14 @@ class RadtranOpacities:
         ind_wv0: int, 
         ind_wv1: int, 
         opacities_result: RadtranOpacitiesResult
-    ):
+    ):  
+        # Width of the wavelength chunk
         chunk_width = ind_wv1 - ind_wv0
+
+        # Ensure we have the right allocated workspace.
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
+        
+        # Get some workspace buffers, which depends on how opacities are encoded.
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
         if storage_code == 0:
             raw_buffer = self.workspace.raw_u16
@@ -971,20 +966,23 @@ class RadtranOpacities:
             raw_buffer = self.workspace.raw_f32
             raw_full_buffer = self.workspace.raw_full_f32
 
-        # wavelengths and surface
+        # Wavelengths and surface reflectance
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
         if np.isscalar(surface.reflectance):
             opacities_result.surf_reflect[:chunk_width] = float(surface.reflectance)
         else:
             opacities_result.surf_reflect[:chunk_width] = surface.reflectance[ind_wv0:ind_wv1]
 
-        # Line by line
-        taugas = opacities_result.taugas[:chunk_width, :]
-        taugas[:] = 0.0
+        # Get the needed slices.
         source_wv0 = self.wavelength_source_indices[ind_wv0]
         source_wv1 = self.wavelength_source_indices[ind_wv1 - 1] + 1
         full_source_sel = np.s_[self.wavelength_source_indices[0]: self.wavelength_source_indices[-1] + 1]
         source_slice = slice(ind_wv0, ind_wv1)
+        source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
+
+        #~~ Molecular opacities ~~#
+        taugas = opacities_result.taugas[:chunk_width, :]
+        taugas[:] = 0.0
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
@@ -995,11 +993,8 @@ class RadtranOpacities:
             dataset = self._molecular_group[species_name]
             self._load_molecular_block(
                 dataset,
-                species_name,
                 i_molecular,
-                source_wv0,
-                source_wv1,
-                full_source_sel,
+                source_sel,
                 source_slice,
                 chunk_width,
                 storage_code,
@@ -1019,12 +1014,10 @@ class RadtranOpacities:
                 taugas,
             )
 
-        # CIA & continuum
+        #~~ CIA & continuum ~~#
         atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
 
         for i_continuum, continuum_name in enumerate(self.continuum_names):
-            if "-" not in continuum_name:
-                continue
 
             species_left, species_right = continuum_name.split("-", 1)
             if species_left not in atmosphere_name_to_index or species_right not in atmosphere_name_to_index:
@@ -1042,11 +1035,8 @@ class RadtranOpacities:
             )
             self._load_continuum_block(
                 dataset,
-                continuum_name,
                 i_continuum,
-                source_wv0,
-                source_wv1,
-                full_source_sel,
+                source_sel,
                 source_slice,
                 chunk_width,
                 storage_code,
@@ -1063,7 +1053,7 @@ class RadtranOpacities:
                 taugas,
             )
 
-        # Rayleigh
+        #~~ Rayleigh ~~#
         tauray = opacities_result.tauray[:chunk_width, :]
         tauray[:,:] = 0.0
         rayleigh_sigma = self.workspace.rayleigh_sigma[:chunk_width]
@@ -1072,22 +1062,20 @@ class RadtranOpacities:
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in RAYLEIGH_MOLECULES:
                 continue
-
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
             _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
 
-        # Raman
+        #~~ Raman ~~#
         compute_raman(
             settings.raman,
             opacities_result.wavelength_um[:chunk_width],
             opacities_result.raman_factor[:chunk_width],
         )
 
-        # Clouds
+        #~~ Clouds ~~#
         taucld = opacities_result.taucld[:chunk_width, :]
         w0_cld = opacities_result.w0_cld[:chunk_width, :]
         g0_cld = opacities_result.g0_cld[:chunk_width, :]
-        
         if clouds is not None:
             _set_clouds(
                 clouds,
@@ -1105,7 +1093,7 @@ class RadtranOpacities:
             w0_cld[:,:] = 0.0
             g0_cld[:,:] = 0.0
 
-        # All of these will ultimately be inputs
+        # Finish up the calculation
         _finish_compute_opacity(
             opacities_result,
             chunk_width,
