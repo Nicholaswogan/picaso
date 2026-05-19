@@ -518,10 +518,8 @@ class RadtranOpacitiesWorkspace:
     continuum_temperature_load_idx: nb.int64[:]
     molecular_block: nb.float64[:,:]
     continuum_block: nb.float64[:,:]
-    molecular_raw_u16: nb.uint16[:]
-    molecular_raw_f32: nb.float32[:]
-    continuum_raw_u16: nb.uint16[:]
-    continuum_raw_f32: nb.float32[:]
+    raw_u16: nb.uint16[:]
+    raw_f32: nb.float32[:]
     raw_full_u16: nb.uint16[:]
     raw_full_f32: nb.float32[:]
     rayleigh_sigma: nb.float64[:]
@@ -566,10 +564,8 @@ class RadtranOpacitiesWorkspace:
         self.continuum_temperature_load_idx = np.empty(ncontinuum_temperature, dtype=np.int64)
         self.molecular_block = np.empty((npressure * ntemperature, nwavelengths_per_chunk), dtype=np.float64)
         self.continuum_block = np.empty((ncontinuum_temperature, nwavelengths_per_chunk), dtype=np.float64)
-        self.molecular_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
-        self.molecular_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
-        self.continuum_raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
-        self.continuum_raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
+        self.raw_u16 = np.empty(nwavelengths_per_chunk, dtype=np.uint16)
+        self.raw_f32 = np.empty(nwavelengths_per_chunk, dtype=np.float32)
         self.raw_full_u16 = np.empty(nwavelengths, dtype=np.uint16)
         self.raw_full_f32 = np.empty(nwavelengths, dtype=np.float32)
         self.rayleigh_sigma = np.empty(nwavelengths_per_chunk, dtype=np.float64)
@@ -901,8 +897,8 @@ class RadtranOpacities:
         source_slice,
         chunk_width,
         storage_code,
-        molecular_raw_buffer,
-        molecular_full_raw_buffer,
+        raw_buffer,
+        raw_full_buffer,
         block,
     ):
         source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
@@ -917,8 +913,8 @@ class RadtranOpacities:
                 self.molecular_y_min[i_molecular],
                 self.molecular_y_max[i_molecular],
                 0.0,
-                molecular_raw_buffer[:chunk_width],
-                molecular_full_raw_buffer,
+                raw_buffer[:chunk_width],
+                raw_full_buffer,
                 block[row_id, :chunk_width],
                 source_slice=source_slice,
             )
@@ -934,8 +930,8 @@ class RadtranOpacities:
         source_slice,
         chunk_width,
         storage_code,
-        continuum_raw_buffer,
-        continuum_full_raw_buffer,
+        raw_buffer,
+        raw_full_buffer,
         block,
     ):
         source_sel = np.s_[source_wv0:source_wv1] if self.cache is None else np.s_[full_source_sel]
@@ -949,8 +945,8 @@ class RadtranOpacities:
                 self.continuum_y_min[i_continuum],
                 self.continuum_y_max[i_continuum],
                 np.log10(CIA_AMAGAT_TO_MOLECULE_CM),
-                continuum_raw_buffer[:chunk_width],
-                continuum_full_raw_buffer,
+                raw_buffer[:chunk_width],
+                raw_full_buffer,
                 block[row_id, :chunk_width],
                 source_slice=source_slice,
             )
@@ -969,15 +965,11 @@ class RadtranOpacities:
         opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
         if storage_code == 0:
-            molecular_raw_buffer = self.workspace.molecular_raw_u16
-            continuum_raw_buffer = self.workspace.continuum_raw_u16
-            molecular_full_raw_buffer = self.workspace.raw_full_u16
-            continuum_full_raw_buffer = self.workspace.raw_full_u16
+            raw_buffer = self.workspace.raw_u16
+            raw_full_buffer = self.workspace.raw_full_u16
         else:
-            molecular_raw_buffer = self.workspace.molecular_raw_f32
-            continuum_raw_buffer = self.workspace.continuum_raw_f32
-            molecular_full_raw_buffer = self.workspace.raw_full_f32
-            continuum_full_raw_buffer = self.workspace.raw_full_f32
+            raw_buffer = self.workspace.raw_f32
+            raw_full_buffer = self.workspace.raw_full_f32
 
         # wavelengths and surface
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
@@ -1011,8 +1003,8 @@ class RadtranOpacities:
                 source_slice,
                 chunk_width,
                 storage_code,
-                molecular_raw_buffer,
-                molecular_full_raw_buffer,
+                raw_buffer,
+                raw_full_buffer,
                 block,
             )
             _accumulate_molecular_tau(
@@ -1058,8 +1050,8 @@ class RadtranOpacities:
                 source_slice,
                 chunk_width,
                 storage_code,
-                continuum_raw_buffer,
-                continuum_full_raw_buffer,
+                raw_buffer,
+                raw_full_buffer,
                 block,
             )
             _accumulate_cia_tau(
