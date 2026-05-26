@@ -537,7 +537,7 @@ class RadtranOpacitiesWorkspace:
     continuum_temperature_ind0: nb.int64[:]
     continuum_temperature_ind1: nb.int64[:]
     continuum_temperature_weight: nb.float64[:]
-    cia_scale: nb.float64[:]
+    continuum_scale: nb.float64[:]
     molecular_pair_map: nb.int64[:,:]
     molecular_pair_pindex: nb.int64[:]
     molecular_pair_tindex: nb.int64[:]
@@ -583,7 +583,7 @@ class RadtranOpacitiesWorkspace:
         self.continuum_temperature_ind0 = np.empty(nlayers, dtype=np.int64)
         self.continuum_temperature_ind1 = np.empty(nlayers, dtype=np.int64)
         self.continuum_temperature_weight = np.empty(nlayers, dtype=np.float64)
-        self.cia_scale = np.empty(nlayers, dtype=np.float64)
+        self.continuum_scale = np.empty(nlayers, dtype=np.float64)
         self.molecular_pair_map = np.full((npressure, ntemperature), -1, dtype=np.int64)
         self.molecular_pair_pindex = np.empty(npressure * ntemperature, dtype=np.int64)
         self.molecular_pair_tindex = np.empty(npressure * ntemperature, dtype=np.int64)
@@ -749,10 +749,47 @@ class RadtranOpacities:
 
         self.continuum_y_min = np.empty(self.ncontinuum, dtype=np.float64)
         self.continuum_y_max = np.empty(self.ncontinuum, dtype=np.float64)
+        self.continuum_types = []
+        self.continuum_primary_species = []
+        self.continuum_secondary_species = []
+        self.continuum_opacity_units = []
         for i, name in enumerate(self.continuum_names):
             dataset = self._continuum_group[name]
-            storage_format = self.storage_format
-            if storage_format == "log10_uint16":
+            continuum_type = str(_read_hdf5_attr_scalar(dataset, "continuum_type", self.opacity_filename)).lower()
+            primary_species = str(_read_hdf5_attr_scalar(dataset, "primary_species", self.opacity_filename))
+            secondary_species = _read_hdf5_attr_scalar(
+                dataset,
+                "secondary_species",
+                self.opacity_filename,
+                default=None,
+            )
+            opacity_unit = str(_read_hdf5_attr_scalar(dataset, "opacity_unit", self.opacity_filename))
+
+            if continuum_type not in {"cia", "cross_section"}:
+                raise ValueError(
+                    f"continuum dataset {name!r} has unsupported continuum_type {continuum_type!r}; "
+                    "expected 'cia' or 'cross_section'"
+                )
+            if continuum_type == "cia":
+                if secondary_species is None or str(secondary_species) == "":
+                    raise ValueError(f"continuum dataset {name!r} requires secondary_species for CIA")
+                if opacity_unit != "cm-1 amagat-2":
+                    raise ValueError(
+                        f"continuum dataset {name!r} with continuum_type='cia' must use opacity_unit 'cm-1 amagat-2', "
+                        f"got {opacity_unit!r}"
+                    )
+            else:
+                if secondary_species not in (None, ""):
+                    raise ValueError(
+                        f"continuum dataset {name!r} with continuum_type='cross_section' must not define secondary_species"
+                    )
+                if opacity_unit != "cm2/molecule":
+                    raise ValueError(
+                        f"continuum dataset {name!r} with continuum_type='cross_section' must use opacity_unit 'cm2/molecule', "
+                        f"got {opacity_unit!r}"
+                    )
+
+            if self.storage_format == "log10_uint16":
                 if "y_min" not in dataset.attrs or "y_max" not in dataset.attrs:
                     raise ValueError(f"continuum dataset {name!r} is missing required y_min/y_max attrs")
                 self.continuum_y_min[i] = float(dataset.attrs["y_min"])
@@ -760,6 +797,11 @@ class RadtranOpacities:
             else:
                 self.continuum_y_min[i] = np.nan
                 self.continuum_y_max[i] = np.nan
+
+            self.continuum_types.append(continuum_type)
+            self.continuum_primary_species.append(primary_species)
+            self.continuum_secondary_species.append(None if secondary_species in (None, "") else str(secondary_species))
+            self.continuum_opacity_units.append(opacity_unit)
 
         self.pressure.flags.writeable = False
         self.temperature.flags.writeable = False
@@ -946,6 +988,7 @@ class RadtranOpacities:
         source_slice,
         chunk_width,
         storage_code,
+        post_decode_log10_factor,
         raw_buffer,
         raw_full_buffer,
         block,
@@ -960,7 +1003,7 @@ class RadtranOpacities:
                 storage_code,
                 self.continuum_y_min[i_continuum],
                 self.continuum_y_max[i_continuum],
-                np.log10(CIA_AMAGAT_TO_MOLECULE_CM),
+                post_decode_log10_factor,
                 raw_buffer[:chunk_width],
                 raw_full_buffer,
                 block[row_id, :chunk_width],
@@ -1049,21 +1092,28 @@ class RadtranOpacities:
         atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
 
         for i_continuum, continuum_name in enumerate(self.continuum_names):
+            continuum_type = self.continuum_types[i_continuum]
+            primary_species = self.continuum_primary_species[i_continuum]
+            secondary_species = self.continuum_secondary_species[i_continuum]
 
-            species_left, species_right = continuum_name.split("-", 1)
-            if species_left not in atmosphere_name_to_index or species_right not in atmosphere_name_to_index:
+            if primary_species not in atmosphere_name_to_index:
                 continue
-
-            i_left = atmosphere_name_to_index[species_left]
-            i_right = atmosphere_name_to_index[species_right]
+            i_primary = atmosphere_name_to_index[primary_species]
             block = self.workspace.continuum_block
             dataset = self._continuum_group[continuum_name]
-            _fill_cia_scale_workspace(
-                atmosphere,
-                i_left,
-                i_right,
-                self.workspace,
-            )
+            if continuum_type == "cia":
+                if secondary_species is None or secondary_species not in atmosphere_name_to_index:
+                    continue
+                i_secondary = atmosphere_name_to_index[secondary_species]
+                _fill_continuum_scale_workspace(atmosphere, i_primary, i_secondary, self.workspace)
+                log10_scale = np.log10(CIA_AMAGAT_TO_MOLECULE_CM)
+            elif continuum_type == "cross_section":
+                _fill_cross_section_scale_workspace(atmosphere, i_primary, self.workspace)
+                log10_scale = 0.0
+            else:
+                raise ValueError(
+                    f"unsupported continuum_type {continuum_type!r} for continuum {continuum_name!r}"
+                )
             self._load_continuum_block(
                 dataset,
                 i_continuum,
@@ -1071,13 +1121,14 @@ class RadtranOpacities:
                 source_slice,
                 chunk_width,
                 storage_code,
+                log10_scale,
                 raw_buffer,
                 raw_full_buffer,
                 block,
             )
-            _accumulate_cia_tau(
+            _accumulate_continuum_tau(
                 block[:self.workspace.continuum_nrows, :chunk_width],
-                self.workspace.cia_scale,
+                self.workspace.continuum_scale,
                 self.workspace.continuum_temperature_ind0,
                 self.workspace.continuum_temperature_ind1,
                 self.workspace.continuum_temperature_weight,
@@ -1262,14 +1313,20 @@ def _fill_continuum_interpolation_workspace(atmosphere, temperature_grid, worksp
 
 
 @nb.njit
-def _fill_cia_scale_workspace(atmosphere, i_left_species, i_right_species, workspace):
+def _fill_continuum_scale_workspace(atmosphere, i_primary_species, i_secondary_species, workspace):
     nlayers = atmosphere.nlayers
     for i in range(nlayers):
-        workspace.cia_scale[i] = (
-            atmosphere.layer_densities[i_left_species, i]
-            * atmosphere.layer_densities[i_right_species, i]
+        workspace.continuum_scale[i] = (
+            atmosphere.layer_densities[i_primary_species, i]
+            * atmosphere.layer_densities[i_secondary_species, i]
             * atmosphere.layer_dz[i]
         )
+
+
+def _fill_cross_section_scale_workspace(atmosphere, i_primary_species, workspace):
+    nlayers = atmosphere.nlayers
+    for i in range(nlayers):
+        workspace.continuum_scale[i] = atmosphere.layer_densities[i_primary_species, i] * atmosphere.layer_dz[i]
 
 
 @nb.njit
@@ -1301,7 +1358,7 @@ def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_in
 
 
 @nb.njit
-def _accumulate_cia_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, tau_out):
+def _accumulate_continuum_tau(block, continuum_scale_row, t_ind0, t_ind1, t_weight, tau_out):
     nwavelengths = block.shape[1]
     nlayers = continuum_scale_row.shape[0]
 
@@ -2155,6 +2212,28 @@ def _read_hdf5_scalar(group, name, filename, default=None):
     return value
 
 
+_MISSING = object()
+
+
+def _read_hdf5_attr_scalar(obj, name, filename, default=_MISSING):
+    if name in obj.attrs:
+        value = obj.attrs[name]
+    elif default is _MISSING:
+        raise ValueError(f"{filename!r} is missing required attribute {name!r} on {obj.name!r}")
+    else:
+        return default
+
+    if isinstance(value, np.ndarray):
+        if value.ndim != 0:
+            raise ValueError(f"attribute {name!r} on {obj.name!r} must be scalar, got shape {value.shape}")
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def _continuum_name(name):
     if "-" in name:
         return name
@@ -2301,7 +2380,6 @@ def convert_sqlite_to_hdf5(
             header.create_dataset("temperature_unit", data=np.asarray(str(temperature_unit), dtype=string_dtype), dtype=string_dtype)
             header.create_dataset("wavelength_unit", data=np.asarray("micron", dtype=string_dtype), dtype=string_dtype)
             header.create_dataset("molecular_unit", data=np.asarray(str(molecular_unit), dtype=string_dtype), dtype=string_dtype)
-            header.create_dataset("continuum_unit", data=np.asarray(str(continuum_unit), dtype=string_dtype), dtype=string_dtype)
             header.create_dataset("molecular_log10_floor", data=np.float64(molecular_log10_floor))
             header.create_dataset("continuum_log10_floor", data=np.float64(continuum_log10_floor))
 
@@ -2484,6 +2562,10 @@ def convert_sqlite_to_hdf5(
                     chunks=continuum_chunks,
                 )
                 dataset.attrs["log10_floor"] = float(continuum_log10_floor)
+                dataset.attrs["continuum_type"] = "cia"
+                dataset.attrs["primary_species"] = continuum_name.split("-", 1)[0]
+                dataset.attrs["secondary_species"] = continuum_name.split("-", 1)[1]
+                dataset.attrs["opacity_unit"] = str(continuum_unit)
                 if storage_format == "log10_uint16":
                     dataset.attrs["y_min"] = np.float64(y_min)
                     dataset.attrs["y_max"] = np.float64(y_max)
