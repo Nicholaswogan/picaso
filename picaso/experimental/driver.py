@@ -684,12 +684,10 @@ class RadtranOpacities:
         self._header = self.file["header"]
         self._molecular_group = self.file["molecular"]
         self._continuum_group = self.file["continuum"]
-        if "storage_format" not in self.file.attrs:
-            raise ValueError(f"{self.opacity_filename!r} is missing required file-level storage_format attr")
-        self.storage_format = _decode_hdf5_string(self.file.attrs["storage_format"])
+        self.storage_format = _read_hdf5_scalar(self._header, "storage_format", self.opacity_filename)
         if self.storage_format not in {"log10_uint16", "log10_float32"}:
             raise ValueError(
-                f"unsupported file-level storage_format {self.storage_format!r}; "
+                f"unsupported storage_format {self.storage_format!r}; "
                 "expected 'log10_uint16' or 'log10_float32'"
             )
 
@@ -2138,6 +2136,25 @@ def _decode_hdf5_string(value):
     return str(value)
 
 
+def _read_hdf5_scalar(group, name, filename, default=None):
+    if name in group:
+        value = group[name][()]
+    elif default is None:
+        raise ValueError(f"{filename!r} is missing required metadata {name!r}")
+    else:
+        return default
+
+    if isinstance(value, np.ndarray):
+        if value.ndim != 0:
+            raise ValueError(f"metadata field {name!r} must be scalar, got shape {value.shape}")
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def _continuum_name(name):
     if "-" in name:
         return name
@@ -2272,20 +2289,21 @@ def convert_sqlite_to_hdf5(
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
         with h5py.File(output_hdf5, "w") as f:
-            f.attrs["format_version"] = "1.0"
-            f.attrs["opacity_type"] = "molecular+continuum"
-            f.attrs["storage_format"] = storage_format
-
             header = f.create_group("header")
+            header.create_dataset("format_version", data=np.asarray("1.0", dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset(
+                "opacity_type", data=np.asarray("molecular+continuum", dtype=string_dtype), dtype=string_dtype
+            )
+            header.create_dataset("storage_format", data=np.asarray(storage_format, dtype=string_dtype), dtype=string_dtype)
             header.create_dataset("molecular_names", data=np.asarray(molecular_names, dtype=object), dtype=string_dtype)
             header.create_dataset("continuum_names", data=np.asarray(continuum_names, dtype=object), dtype=string_dtype)
-            header.attrs["pressure_unit"] = str(pressure_unit)
-            header.attrs["temperature_unit"] = str(temperature_unit)
-            header.attrs["wavelength_unit"] = "micron"
-            header.attrs["molecular_unit"] = str(molecular_unit)
-            header.attrs["continuum_unit"] = str(continuum_unit)
-            header.attrs["molecular_log10_floor"] = float(molecular_log10_floor)
-            header.attrs["continuum_log10_floor"] = float(continuum_log10_floor)
+            header.create_dataset("pressure_unit", data=np.asarray(str(pressure_unit), dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset("temperature_unit", data=np.asarray(str(temperature_unit), dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset("wavelength_unit", data=np.asarray("micron", dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset("molecular_unit", data=np.asarray(str(molecular_unit), dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset("continuum_unit", data=np.asarray(str(continuum_unit), dtype=string_dtype), dtype=string_dtype)
+            header.create_dataset("molecular_log10_floor", data=np.float64(molecular_log10_floor))
+            header.create_dataset("continuum_log10_floor", data=np.float64(continuum_log10_floor))
 
             molecular_group = f.create_group("molecular")
             base_pressures = None
