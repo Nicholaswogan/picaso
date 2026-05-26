@@ -2272,6 +2272,50 @@ def _continuum_name(name):
     )
 
 
+def _continuum_metadata_from_source_name(source_name, continuum_unit):
+    if source_name == "H-bf":
+        return {
+            "continuum_name": source_name,
+            "continuum_type": "cross_section",
+            "primary_species": "H-",
+            "secondary_species": None,
+            "opacity_unit": "cm2/molecule",
+        }
+
+    if source_name == "H-ff":
+        return {
+            "continuum_name": source_name,
+            "continuum_type": "cia",
+            "primary_species": "H",
+            "secondary_species": "e-",
+            "opacity_unit": str(continuum_unit),
+        }
+
+    if source_name == "H2-":
+        return {
+            "continuum_name": source_name,
+            "continuum_type": "cia",
+            "primary_species": "H2",
+            "secondary_species": "e-",
+            "opacity_unit": str(continuum_unit),
+        }
+
+    continuum_name = _continuum_name(source_name)
+    if "-" not in continuum_name:
+        raise ValueError(
+            f"Could not infer continuum metadata from {source_name!r}; "
+            "please add an explicit special-case mapping."
+        )
+    primary_species, secondary_species = continuum_name.split("-", 1)
+    return {
+        "continuum_name": continuum_name,
+        "continuum_type": "cia",
+        "primary_species": primary_species,
+        "secondary_species": secondary_species,
+        "opacity_unit": str(continuum_unit),
+    }
+
+
 def convert_sqlite_to_hdf5(
     input_db,
     output_hdf5,
@@ -2355,7 +2399,8 @@ def convert_sqlite_to_hdf5(
         molecular_names = [row[0] for row in cur.fetchall()]
         cur.execute("SELECT DISTINCT molecule FROM continuum ORDER BY molecule")
         continuum_source_names = [row[0] for row in cur.fetchall()]
-        continuum_names = [_continuum_name(name) for name in continuum_source_names]
+        continuum_metadata = [_continuum_metadata_from_source_name(name, continuum_unit) for name in continuum_source_names]
+        continuum_names = [meta["continuum_name"] for meta in continuum_metadata]
 
         if not molecular_names:
             raise RuntimeError("No molecular species found in SQLite database.")
@@ -2484,9 +2529,8 @@ def convert_sqlite_to_hdf5(
             continuum_temperature_grid = None
             continuum_chunks = None
             total_continuum = len(continuum_names)
-            for i_continuum, (source_name, continuum_name) in enumerate(
-                zip(continuum_source_names, continuum_names), start=1
-            ):
+            for i_continuum, (source_name, meta) in enumerate(zip(continuum_source_names, continuum_metadata), start=1):
+                continuum_name = meta["continuum_name"]
                 if verbose:
                     print(f"[continuum {i_continuum}/{total_continuum}] Writing {continuum_name}")
                 cur.execute(
@@ -2562,10 +2606,11 @@ def convert_sqlite_to_hdf5(
                     chunks=continuum_chunks,
                 )
                 dataset.attrs["log10_floor"] = float(continuum_log10_floor)
-                dataset.attrs["continuum_type"] = "cia"
-                dataset.attrs["primary_species"] = continuum_name.split("-", 1)[0]
-                dataset.attrs["secondary_species"] = continuum_name.split("-", 1)[1]
-                dataset.attrs["opacity_unit"] = str(continuum_unit)
+                dataset.attrs["continuum_type"] = meta["continuum_type"]
+                dataset.attrs["primary_species"] = meta["primary_species"]
+                if meta["secondary_species"] is not None:
+                    dataset.attrs["secondary_species"] = meta["secondary_species"]
+                dataset.attrs["opacity_unit"] = meta["opacity_unit"]
                 if storage_format == "log10_uint16":
                     dataset.attrs["y_min"] = np.float64(y_min)
                     dataset.attrs["y_max"] = np.float64(y_max)
