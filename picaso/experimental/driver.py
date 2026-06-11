@@ -1323,6 +1323,7 @@ def _fill_continuum_scale_workspace(atmosphere, i_primary_species, i_secondary_s
         )
 
 
+@nb.njit
 def _fill_cross_section_scale_workspace(atmosphere, i_primary_species, workspace):
     nlayers = atmosphere.nlayers
     for i in range(nlayers):
