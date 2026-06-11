@@ -1866,12 +1866,25 @@ class Radtran:
     def _setup_clouds(self, clouds: Clouds):
         "Validate then set cloud properties"
 
+        scale_factor_cloudy = 1.0
+        scale_factor_clear = np.nan
+
         if clouds is None:
             self.clouds = None
-            return
+            return scale_factor_cloudy, scale_factor_clear
 
+        # Validate
         _validate_clouds(clouds, self.atmosphere.layer_pressures_cgs, self.opacities.wavelength)
+
+        # Set clouds
         self.clouds = clouds
+
+        # Determine some scale factors for patchy clouds.
+        if self.clouds.do_holes:
+            scale_factor_cloudy = 1.0 - self.clouds.fhole
+            scale_factor_clear = self.clouds.fhole
+
+        return scale_factor_cloudy, scale_factor_clear
 
     def _setup_surface(self, surface: Surface):
         "Validate then set the surface boundary condition"
@@ -2107,21 +2120,13 @@ class Radtran:
         self._setup_atmosphere(atm, planet)
 
         # Setup clouds
-        self._setup_clouds(clouds)
+        scale_factor_cloudy, scale_factor_clear = self._setup_clouds(clouds)
 
         # Setup surface boundary condition
         self._setup_surface(surface)
 
         # Setup star
         self._setup_star(star)
-
-        # Determine some scale factors for patchy clouds, if needed
-        if self.clouds is not None and self.clouds.do_holes:
-            scale_factor_cloudy = 1.0 - self.clouds.fhole
-            scale_factor_clear = self.clouds.fhole
-        else:
-            scale_factor_cloudy = 1.0
-            scale_factor_clear = np.nan
 
         # Prepare interpolation
         self._prepare_interpolation()
