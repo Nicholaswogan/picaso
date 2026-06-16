@@ -705,6 +705,27 @@ def _read_hdf5_attr_scalar(obj, name, filename, default=_MISSING):
     return value
 
 
+def _infer_bin_edges_from_centers(wavelength):
+    if not isinstance(wavelength, np.ndarray):
+        wavelength = np.asarray(wavelength, dtype=np.float64)
+    if wavelength.ndim != 1:
+        raise ValueError(f"wavelength must be 1D to infer bin edges, got shape {wavelength.shape}")
+    if wavelength.size < 2:
+        raise ValueError("at least two wavelength centers are required to infer bin edges")
+    if not np.all(np.isfinite(wavelength)):
+        raise ValueError("wavelength must contain only finite values")
+    if np.any(np.diff(wavelength) <= 0.0):
+        raise ValueError("wavelength must be strictly increasing to infer bin edges")
+
+    bin_edges = np.empty((wavelength.size, 2), dtype=np.float64)
+    midpoints = 0.5 * (wavelength[1:] + wavelength[:-1])
+    bin_edges[1:, 0] = midpoints
+    bin_edges[:-1, 1] = midpoints
+    bin_edges[0, 0] = wavelength[0] - 0.5 * (wavelength[1] - wavelength[0])
+    bin_edges[-1, 1] = wavelength[-1] + 0.5 * (wavelength[-1] - wavelength[-2])
+    return bin_edges
+
+
 class RadtranOpacities:
 
     def __init__(self, opacity_filename, wavelength_range, opacity_cache_size_limit):
@@ -763,6 +784,7 @@ class RadtranOpacities:
         else:
             self.wavelength_source_indices = np.arange(wavelength.size, dtype=np.int64)
             self.wavelength = wavelength
+        self.bin_edges = _infer_bin_edges_from_centers(self.wavelength)
 
         self.npressure = int(self.pressure.size)
         self.ntemperature = int(self.temperature.size)
@@ -844,6 +866,7 @@ class RadtranOpacities:
         self.pressure.flags.writeable = False
         self.temperature.flags.writeable = False
         self.wavelength.flags.writeable = False
+        self.bin_edges.flags.writeable = False
         self.continuum_temperatures.flags.writeable = False
 
         self.workspace = RadtranOpacitiesWorkspace()
