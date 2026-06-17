@@ -1084,7 +1084,7 @@ class RadtranOpacities:
         chunk_width = ind_wv1 - ind_wv0
 
         # Ensure we have the right allocated workspace.
-        opacities_result._ensure(atmosphere.nlayers, self.workspace.nwavelengths_per_chunk)
+        opacities_result._ensure(atmosphere.nlayers, 1, self.workspace.nwavelengths_per_chunk)
         
         # Get some workspace buffers, which depends on how opacities are encoded.
         storage_code = 0 if self.storage_format == "log10_uint16" else 1
@@ -1094,6 +1094,9 @@ class RadtranOpacities:
         else:
             raw_buffer = self.workspace.raw_f32
             raw_full_buffer = self.workspace.raw_full_f32
+
+        # Gauss weights
+        opacities_result.ck_weights[:] = 1.0
 
         # Wavelengths and surface reflectance
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
@@ -1114,8 +1117,8 @@ class RadtranOpacities:
         ncontinuum_active = 0
 
         #~~ Molecular opacities ~~#
-        taugas = opacities_result.taugas[:chunk_width, :]
-        taugas[:] = 0.0
+        opacities_result.taugas[:chunk_width, :, :] = 0.0
+        taugas = opacities_result.taugas[:chunk_width, 0, :]
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
@@ -1257,6 +1260,7 @@ class RadtranOpacities:
         _finish_compute_opacity(
             opacities_result,
             chunk_width,
+            1,
             settings.stream,
             settings.delta_eddington,
             fthin_cld=1.0,
@@ -1272,6 +1276,7 @@ class RadtranOpacities:
         _finish_compute_opacity(
             opacities_result,
             chunk_width,
+            1,
             settings.stream,
             settings.delta_eddington,
             clouds.fthin_cld,
@@ -1490,86 +1495,89 @@ def _set_clouds(
 
 
 @nb.njit
-def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, stream, delta_eddington, fthin_cld):
-    
+def _finish_compute_opacity(result: RadtranOpacitiesResult, chunk_width, ngauss, stream, delta_eddington, fthin_cld):
+
     for iw in range(chunk_width):
-        running_tau = 0.0
-        running_tau_dedd = 0.0
-        result.tau[iw, 0] = 0.0
-        result.tau_dedd[iw, 0] = 0.0
         raman_factor = result.raman_factor[iw]
 
-        for i in range(result.nlayers):
-            # Unpack to scalars
-            taugas = result.taugas[iw,i]
-            tauray = result.tauray[iw,i]
-            taucld = result.taucld[iw,i]
-            w0_cld = result.w0_cld[iw,i]
-            g0_cld = result.g0_cld[iw,i]
+        for igauss in range(ngauss):
 
-            # Apply thinning to cloud
-            taucld *= fthin_cld
+            running_tau = 0.0
+            running_tau_dedd = 0.0
+            result.tau[iw, igauss, 0] = 0.0
+            result.tau_dedd[iw, igauss, 0] = 0.0
 
-            # Total opacity
-            dtau = taugas + tauray + taucld
+            for i in range(result.nlayers):
+                # Unpack to scalars
+                taugas = result.taugas[iw, igauss, i]
+                tauray = result.tauray[iw, i]
+                taucld = result.taucld[iw, i]
+                w0_cld = result.w0_cld[iw, i]
+                g0_cld = result.g0_cld[iw, i]
 
-            tauscat_cld = w0_cld*taucld
-            tauscat = tauscat_cld + tauray
-            if tauscat > 0.0:
-                # Fraction of total scattering due to clouds.
-                ftau_cld = tauscat_cld/tauscat
-                # Fraction of total scattering due to Rayleigh.
-                ftau_ray = tauray/tauscat
-                # Hansen & Travis 1974 for Rayleigh scattering 
-                gcos2 = 0.5 * ftau_ray
-            else:
-                ftau_cld = 0.0
-                ftau_ray = 0.0
-                gcos2 = 0.0
+                # Apply thinning to cloud
+                taucld *= fthin_cld
 
-            # Asymmetry
-            cosb = g0_cld
+                # Total opacity
+                dtau = taugas + tauray + taucld
 
-            # Single scattering albedo
-            if dtau > 0:
-                w0 = (tauray*raman_factor + taucld*w0_cld)/dtau
-                w0 = np.minimum(np.maximum(w0, 1.0e-8), 1.0 - 1.0e-8)
+                tauscat_cld = w0_cld*taucld
+                tauscat = tauscat_cld + tauray
+                if tauscat > 0.0:
+                    # Fraction of total scattering due to clouds.
+                    ftau_cld = tauscat_cld/tauscat
+                    # Fraction of total scattering due to Rayleigh.
+                    ftau_ray = tauray/tauscat
+                    # Hansen & Travis 1974 for Rayleigh scattering 
+                    gcos2 = 0.5 * ftau_ray
+                else:
+                    ftau_cld = 0.0
+                    ftau_ray = 0.0
+                    gcos2 = 0.0
 
-                w0_no_raman = (tauray*0.99999 + taucld*w0_cld)/dtau
-                w0_no_raman = np.minimum(np.maximum(w0_no_raman, 1.0e-8), 1.0 - 1.0e-8)
-            else:
-                w0 = 1.0e-8
-                w0_no_raman = 1.0e-8
+                # Asymmetry
+                cosb = g0_cld
 
-            # Cumulative total opacity
-            running_tau += dtau
+                # Single scattering albedo
+                if dtau > 0:
+                    w0 = (tauray*raman_factor + taucld*w0_cld)/dtau
+                    w0 = np.minimum(np.maximum(w0, 1.0e-8), 1.0 - 1.0e-8)
 
-            # Delta eddington
-            if delta_eddington:
-                f_deltaM = cosb**stream
-                w0_dedd = w0*(1.0 - f_deltaM)/(1.0 - w0*f_deltaM)
-                cosb_dedd = (cosb - f_deltaM)/(1.0 - f_deltaM)
-                dtau_dedd = dtau*(1.0 - w0*f_deltaM)
-                running_tau_dedd += dtau_dedd
-            else:
-                w0_dedd = w0
-                cosb_dedd = cosb
-                dtau_dedd = dtau
-                running_tau_dedd += dtau_dedd
+                    w0_no_raman = (tauray*0.99999 + taucld*w0_cld)/dtau
+                    w0_no_raman = np.minimum(np.maximum(w0_no_raman, 1.0e-8), 1.0 - 1.0e-8)
+                else:
+                    w0 = 1.0e-8
+                    w0_no_raman = 1.0e-8
 
-            # Save results
-            result.dtau[iw,i] = dtau
-            result.ftau_cld[iw,i] = ftau_cld
-            result.ftau_ray[iw,i] = ftau_ray
-            result.gcos2[iw,i] = gcos2
-            result.cosb[iw,i] = cosb
-            result.w0[iw,i] = w0
-            result.w0_no_raman[iw,i] = w0_no_raman
-            result.tau[iw,i+1] = running_tau
-            result.w0_dedd[iw,i] = w0_dedd
-            result.cosb_dedd[iw,i] = cosb_dedd
-            result.dtau_dedd[iw,i] = dtau_dedd
-            result.tau_dedd[iw, i+1] = running_tau_dedd
+                # Cumulative total opacity
+                running_tau += dtau
+
+                # Delta eddington
+                if delta_eddington:
+                    f_deltaM = cosb**stream
+                    w0_dedd = w0*(1.0 - f_deltaM)/(1.0 - w0*f_deltaM)
+                    cosb_dedd = (cosb - f_deltaM)/(1.0 - f_deltaM)
+                    dtau_dedd = dtau*(1.0 - w0*f_deltaM)
+                    running_tau_dedd += dtau_dedd
+                else:
+                    w0_dedd = w0
+                    cosb_dedd = cosb
+                    dtau_dedd = dtau
+                    running_tau_dedd += dtau_dedd
+
+                # Save results
+                result.dtau[iw, igauss, i] = dtau
+                result.ftau_cld[iw, i] = ftau_cld
+                result.ftau_ray[iw, i] = ftau_ray
+                result.gcos2[iw, i] = gcos2
+                result.cosb[iw, igauss, i] = cosb
+                result.w0[iw, igauss, i] = w0
+                result.w0_no_raman[iw, igauss, i] = w0_no_raman
+                result.tau[iw, igauss, i + 1] = running_tau
+                result.w0_dedd[iw, igauss, i] = w0_dedd
+                result.cosb_dedd[iw, igauss, i] = cosb_dedd
+                result.dtau_dedd[iw, igauss, i] = dtau_dedd
+                result.tau_dedd[iw, igauss, i + 1] = running_tau_dedd
         
 @nb.experimental.jitclass
 class RadtranOpacitiesResult:
@@ -1577,69 +1585,77 @@ class RadtranOpacitiesResult:
     # Dimensions
     nlayers : nb.int64
     nwavelengths_per_chunk : nb.int64
+    ngauss : nb.int64
 
     wavelength_um : nb.float64[:]
     surf_reflect : nb.float64[:]
-    taugas : nb.float64[:,:]
+    ck_weights : nb.float64[:]
+    taugas : nb.float64[:,:,:]
     tauray : nb.float64[:,:]
     taucld : nb.float64[:,:]
     w0_cld : nb.float64[:,:]
     g0_cld : nb.float64[:,:]
 
-    dtau_dedd : nb.float64[:,:]
-    tau_dedd : nb.float64[:,:]
-    w0_dedd : nb.float64[:,:]
-    cosb_dedd : nb.float64[:,:]
+    dtau_dedd : nb.float64[:,:,:]
+    tau_dedd : nb.float64[:,:,:]
+    w0_dedd : nb.float64[:,:,:]
+    cosb_dedd : nb.float64[:,:,:]
 
     ftau_cld : nb.float64[:,:]
     ftau_ray : nb.float64[:,:]
     gcos2 : nb.float64[:,:]
 
-    dtau : nb.float64[:,:]
-    tau : nb.float64[:,:]
-    w0 : nb.float64[:,:]
-    w0_no_raman : nb.float64[:,:]
-    cosb : nb.float64[:,:]
+    dtau : nb.float64[:,:,:]
+    tau : nb.float64[:,:,:]
+    w0 : nb.float64[:,:,:]
+    w0_no_raman : nb.float64[:,:,:]
+    cosb : nb.float64[:,:,:]
     raman_factor : nb.float64[:]
 
     spectrum : nb.float64[:]
 
     def __init__(self):
-        self._allocate(0, 0)
+        self._allocate(0, 1, 0)
 
-    def _allocate(self, nlayers, nwavelengths_per_chunk):
+    def _allocate(self, nlayers, ngauss, nwavelengths_per_chunk):
         self.nlayers = nlayers
+        self.ngauss = ngauss
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
 
         self.wavelength_um = np.empty(nwavelengths_per_chunk, dtype=np.float64)
         self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
-        self.taugas = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.ck_weights = np.ones(ngauss, dtype=np.float64)
+        self.taugas = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
         self.tauray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.taucld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.w0_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.g0_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
-        self.dtau_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.tau_dedd = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
-        self.w0_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.cosb_dedd = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.dtau_dedd = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
+        self.tau_dedd = np.empty((nwavelengths_per_chunk, ngauss, nlayers+1), dtype=np.float64)
+        self.w0_dedd = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
+        self.cosb_dedd = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
 
         self.ftau_cld = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.ftau_ray = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
         self.gcos2 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
 
-        self.dtau = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.tau = np.empty((nwavelengths_per_chunk, nlayers+1), dtype=np.float64)
-        self.w0 = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.w0_no_raman = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
-        self.cosb = np.empty((nwavelengths_per_chunk, nlayers), dtype=np.float64)
+        self.dtau = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
+        self.tau = np.empty((nwavelengths_per_chunk, ngauss, nlayers+1), dtype=np.float64)
+        self.w0 = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
+        self.w0_no_raman = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
+        self.cosb = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
         self.raman_factor = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
         self.spectrum = np.empty(nwavelengths_per_chunk, dtype=np.float64)
 
-    def _ensure(self, nlayers, nwavelengths_per_chunk):
-        if nlayers != self.nlayers or nwavelengths_per_chunk != self.nwavelengths_per_chunk:
-            self._allocate(nlayers, nwavelengths_per_chunk)
+    def _ensure(self, nlayers, ngauss, nwavelengths_per_chunk):
+        if (
+            nlayers != self.nlayers
+            or ngauss != self.ngauss
+            or nwavelengths_per_chunk != self.nwavelengths_per_chunk
+        ):
+            self._allocate(nlayers, ngauss, nwavelengths_per_chunk)
 
 @nb.experimental.jitclass
 class RadtranAtmosphere:
@@ -2006,14 +2022,16 @@ class Radtran:
             self.thermal,
             self.atmosphere.nlayers,
             chunk_width,
+            self.opacities_result.ngauss,
             self.phase.ubar1.shape[0],
             self.phase.ubar1.shape[1],
+            self.opacities_result.ck_weights,
             self.phase.gweight,
             self.phase.tweight,
             self.opacities_result.wavelength_um[:chunk_width],
-            self.opacities_result.dtau[:chunk_width, :],
-            self.opacities_result.w0[:chunk_width, :],
-            self.opacities_result.cosb[:chunk_width, :],
+            self.opacities_result.dtau[:chunk_width, :, :],
+            self.opacities_result.w0[:chunk_width, :, :],
+            self.opacities_result.cosb[:chunk_width, :, :],
             self.atmosphere.level_temperatures,
             self.atmosphere.level_pressures_cgs,
             self.phase.ubar1,
@@ -2042,21 +2060,23 @@ class Radtran:
             self.reflected,
             self.atmosphere.nlayers,
             chunk_width,
+            self.opacities_result.ngauss,
             self.phase.effective_numg,
             self.phase.effective_numt,
+            self.opacities_result.ck_weights,
             self.phase.gweight,
             self.phase.tweight,
-            self.opacities_result.dtau_dedd[:chunk_width, :],
-            self.opacities_result.tau_dedd[:chunk_width, :],
-            self.opacities_result.w0_dedd[:chunk_width, :],
-            self.opacities_result.cosb_dedd[:chunk_width, :],
+            self.opacities_result.dtau_dedd[:chunk_width, :, :],
+            self.opacities_result.tau_dedd[:chunk_width, :, :],
+            self.opacities_result.w0_dedd[:chunk_width, :, :],
+            self.opacities_result.cosb_dedd[:chunk_width, :, :],
             self.opacities_result.gcos2[:chunk_width, :],
             self.opacities_result.ftau_cld[:chunk_width, :],
             self.opacities_result.ftau_ray[:chunk_width, :],
-            self.opacities_result.dtau[:chunk_width, :],
-            self.opacities_result.tau[:chunk_width, :],
-            self.opacities_result.w0[:chunk_width, :],
-            self.opacities_result.cosb[:chunk_width, :],
+            self.opacities_result.dtau[:chunk_width, :, :],
+            self.opacities_result.tau[:chunk_width, :, :],
+            self.opacities_result.w0_no_raman[:chunk_width, :, :],
+            self.opacities_result.cosb[:chunk_width, :, :],
             self.opacities_result.surf_reflect[:chunk_width],
             self.phase.ubar0,
             self.phase.ubar1,
@@ -2095,6 +2115,7 @@ class Radtran:
         get_transit_1d(
             self.atmosphere.nlayers + 1,
             chunk_width,
+            self.opacities_result.ngauss,
             self.atmosphere.level_z,
             self.atmosphere.level_dz,
             self.star.radius,
@@ -2104,7 +2125,8 @@ class Radtran:
             self.atmosphere.level_pressures_cgs,
             self.atmosphere.level_temperatures,
             self.atmosphere.layer_colden,
-            self.opacities_result.dtau[:chunk_width, :],
+            self.opacities_result.dtau[:chunk_width, :, :],
+            self.opacities_result.ck_weights,
             self.opacities_result.spectrum[:chunk_width],
         )
 

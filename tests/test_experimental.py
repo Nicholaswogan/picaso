@@ -95,19 +95,22 @@ def _call_experimental(case, hard_surface):
     _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     solver = experimental_fluxes.ThermalSolver()
     flux = np.full(case["nwno"], np.nan, dtype=np.float64)
+    ck_weights = np.array([1.0], dtype=np.float64)
 
     experimental_fluxes.get_thermal_1d.py_func(
         solver,
         case["nlevel"],
         case["nwno"],
+        1,
         case["numg"],
         case["numt"],
+        ck_weights,
         gweight,
         tweight,
         case["wavelength_um"].copy(),
-        case["dtau"].copy(),
-        case["w0"].copy(),
-        case["cosb"].copy(),
+        case["dtau"][:, None, :].copy(),
+        case["w0"][:, None, :].copy(),
+        case["cosb"][:, None, :].copy(),
         case["tlevel"].copy(),
         case["plevel"].copy(),
         case["ubar1"].copy(),
@@ -262,28 +265,33 @@ def _call_legacy_reflected(case):
 
 
 def _call_experimental_reflected(case):
-    dtau = case["dtau"].copy()
-    tau = np.zeros((case["nwno"], case["nlevel"]), dtype=np.float64)
-    tau[:, 1:] = np.cumsum(dtau, axis=1)
-    w0 = case["w0"].copy()
-    cosb = case["cosb"].copy()
+    dtau = case["dtau"][:, None, :].copy()
+    tau = np.zeros((case["nwno"], 1, case["nlevel"]), dtype=np.float64)
+    tau[:, 0, 1:] = np.cumsum(case["dtau"], axis=1)
+    w0 = case["w0"][:, None, :].copy()
+    cosb = case["cosb"][:, None, :].copy()
     gcos2 = 0.5 * case["ftau_ray"].copy()
-    dtau_og = case["dtau_og"].copy()
-    tau_og = np.zeros((case["nwno"], case["nlevel"]), dtype=np.float64)
-    tau_og[:, 1:] = np.cumsum(dtau_og, axis=1)
+    dtau_og = case["dtau_og"][:, None, :].copy()
+    tau_og = np.zeros((case["nwno"], 1, case["nlevel"]), dtype=np.float64)
+    tau_og[:, 0, 1:] = np.cumsum(case["dtau_og"], axis=1)
+    w0_og = case["w0_og"][:, None, :].copy()
+    cosb_og = case["cosb_og"][:, None, :].copy()
 
     gangle, _, tangle, _ = disco.get_angles_3d(case["numg"], case["numt"])
     ubar0, ubar1, _, _, _ = disco.compute_disco(case["numg"], case["numt"], gangle, tangle, case["phase_angle"])
     _, gweight, _, tweight = disco.get_angles_3d(case["numg"], case["numt"])
     solver = experimental_fluxes.ReflectedSolver()
     albedo = np.full(case["nwno"], np.nan, dtype=np.float64)
+    ck_weights = np.array([1.0], dtype=np.float64)
 
     experimental_fluxes.get_reflected_1d.py_func(
         solver,
         case["nlevel"],
         case["nwno"],
+        1,
         case["numg"],
         case["numt"],
+        ck_weights,
         gweight,
         tweight,
         dtau,
@@ -295,8 +303,8 @@ def _call_experimental_reflected(case):
         case["ftau_ray"].copy(),
         dtau_og,
         tau_og,
-        case["w0_og"].copy(),
-        case["cosb_og"].copy(),
+        w0_og,
+        cosb_og,
         case["surf_reflect"].copy(),
         ubar0,
         ubar1,
@@ -360,9 +368,11 @@ def _call_legacy_transmission(case):
 
 def _call_experimental_transmission(case):
     transit_depth = np.full(case["nwno"], np.nan, dtype=np.float64)
+    ck_weights = np.array([1.0], dtype=np.float64)
     experimental_fluxes.get_transit_1d.py_func(
         case["nlevel"],
         case["nwno"],
+        1,
         case["z"].copy(),
         case["dz"].copy(),
         case["rstar"],
@@ -372,7 +382,8 @@ def _call_experimental_transmission(case):
         case["player"].copy(),
         case["tlayer"].copy(),
         case["colden"].copy(),
-        case["dtau"].copy(),
+        case["dtau"][:, None, :].copy(),
+        ck_weights,
         transit_depth,
     )
     return transit_depth

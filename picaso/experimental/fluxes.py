@@ -159,8 +159,10 @@ def get_thermal_1d(
     self,
     nlevel,
     nwavelengths_in_chunk,
+    ngauss_ck,
     numg,
     numt,
+    ck_weights,
     gweight,
     tweight,
     wavelength_um,
@@ -180,29 +182,33 @@ def get_thermal_1d(
     returns the top-of-atmosphere flux on the Gauss/Chebyshev grid.
 
     The opacity inputs are expected to be chunk-major, with shape
-    ``(nwavelengths_in_chunk, nlayer)`` for ``dtau``, ``w0``, and ``cosb``.
+    ``(nwavelengths_in_chunk, ngauss_ck, nlayer)`` for ``dtau``, ``w0``, and
+    ``cosb``.
     """
 
     self._ensure(nlevel)
 
     for iw in nb.prange(nwavelengths_in_chunk):
-        flux[iw] = get_thermal_1d_w(
-            self.workspace[nb.get_thread_id()],
-            nlevel,
-            numg,
-            numt,
-            gweight,
-            tweight,
-            wavelength_um[iw],
-            dtau[iw, :],
-            w0[iw, :],
-            cosb[iw, :],
-            tlevel,
-            plevel,
-            ubar1,
-            surf_reflect[iw],
-            hard_surface,
-        )
+        flux_iw = 0.0
+        for igauss in range(ngauss_ck):
+            flux_iw += ck_weights[igauss] * get_thermal_1d_w(
+                self.workspace[nb.get_thread_id()],
+                nlevel,
+                numg,
+                numt,
+                gweight,
+                tweight,
+                wavelength_um[iw],
+                dtau[iw, igauss, :],
+                w0[iw, igauss, :],
+                cosb[iw, igauss, :],
+                tlevel,
+                plevel,
+                ubar1,
+                surf_reflect[iw],
+                hard_surface,
+            )
+        flux[iw] = flux_iw
 
 @nb.njit
 def get_thermal_1d_w(
@@ -478,8 +484,10 @@ def get_reflected_1d(
     self,
     nlevel,
     nwavelengths_in_chunk,
+    ngauss_ck,
     numg,
     numt,
+    ck_weights,
     gweight,
     tweight,
     dtau,
@@ -520,39 +528,42 @@ def get_reflected_1d(
     self._ensure(nlevel)
 
     for iw in nb.prange(nwavelengths_in_chunk):
-        albedo[iw] = get_reflected_1d_w(
-            self.workspace[nb.get_thread_id()],
-            nlevel,
-            numg,
-            numt,
-            gweight,
-            tweight,
-            dtau[iw, :],
-            tau[iw, :],
-            w0[iw, :],
-            cosb[iw, :],
-            gcos2[iw, :],
-            ftau_cld[iw, :],
-            ftau_ray[iw, :],
-            dtau_og[iw, :],
-            tau_og[iw, :],
-            w0_og[iw, :],
-            cosb_og[iw, :],
-            surf_reflect[iw],
-            ubar0,
-            ubar1,
-            cos_theta,
-            1.0,
-            single_phase,
-            multi_phase,
-            frac_a,
-            frac_b,
-            frac_c,
-            constant_back,
-            constant_forward,
-            toon_coefficients,
-            b_top,
-        )
+        albedo_iw = 0.0
+        for igauss in range(ngauss_ck):
+            albedo_iw += ck_weights[igauss] * get_reflected_1d_w(
+                self.workspace[nb.get_thread_id()],
+                nlevel,
+                numg,
+                numt,
+                gweight,
+                tweight,
+                dtau[iw, igauss, :],
+                tau[iw, igauss, :],
+                w0[iw, igauss, :],
+                cosb[iw, igauss, :],
+                gcos2[iw, :],
+                ftau_cld[iw, :],
+                ftau_ray[iw, :],
+                dtau_og[iw, igauss, :],
+                tau_og[iw, igauss, :],
+                w0_og[iw, igauss, :],
+                cosb_og[iw, igauss, :],
+                surf_reflect[iw],
+                ubar0,
+                ubar1,
+                cos_theta,
+                1.0,
+                single_phase,
+                multi_phase,
+                frac_a,
+                frac_b,
+                frac_c,
+                constant_back,
+                constant_forward,
+                toon_coefficients,
+                b_top,
+            )
+        albedo[iw] = albedo_iw
 
 @nb.njit
 def get_reflected_1d_w(
@@ -798,6 +809,7 @@ class TransmissionResult:
 def get_transit_1d(
     nlevel,
     nwavelengths_in_chunk,
+    ngauss_ck,
     z,
     dz,
     rstar,
@@ -808,24 +820,28 @@ def get_transit_1d(
     tlayer,
     colden,
     dtau,
+    ck_weights,
     transit_depth,
 ):
     """Compute transmission spectra for a single atmosphere."""
 
     for iw in nb.prange(nwavelengths_in_chunk):
-        transit_depth[iw] = get_transit_1d_w(
-            nlevel,
-            z,
-            dz,
-            rstar,
-            mmw,
-            k_b,
-            amu,
-            player,
-            tlayer,
-            colden,
-            dtau[iw, :],
-        )
+        transit_iw = 0.0
+        for igauss in range(ngauss_ck):
+            transit_iw += ck_weights[igauss] * get_transit_1d_w(
+                nlevel,
+                z,
+                dz,
+                rstar,
+                mmw,
+                k_b,
+                amu,
+                player,
+                tlayer,
+                colden,
+                dtau[iw, igauss, :],
+            )
+        transit_depth[iw] = transit_iw
 
 
 @nb.njit
