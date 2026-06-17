@@ -72,6 +72,64 @@ def _build_constant_r_wavelength_grid(min_wavelength, max_wavelength, constant_r
     return wavelength
 
 
+def _build_bin_edges_from_centers(wavelength):
+    wavelength = np.asarray(wavelength, dtype=np.float64)
+    if wavelength.ndim != 1:
+        raise ValueError(f"wavelength must be 1D to infer bin edges, got shape {wavelength.shape}")
+    if wavelength.size < 2:
+        raise ValueError("at least two wavelength centers are required to infer bin edges")
+    if not np.all(np.isfinite(wavelength)):
+        raise ValueError("wavelength must contain only finite values")
+    if np.any(np.diff(wavelength) <= 0.0):
+        raise ValueError("wavelength must be strictly increasing to infer bin edges")
+
+    bin_edges = np.empty((wavelength.size, 2), dtype=np.float64)
+    midpoints = 0.5 * (wavelength[1:] + wavelength[:-1])
+    bin_edges[1:, 0] = midpoints
+    bin_edges[:-1, 1] = midpoints
+    bin_edges[0, 0] = wavelength[0] - 0.5 * (wavelength[1] - wavelength[0])
+    bin_edges[-1, 1] = wavelength[-1] + 0.5 * (wavelength[-1] - wavelength[-2])
+    return bin_edges
+
+
+def _validate_bin_edges(bin_edges):
+    bin_edges = np.asarray(bin_edges, dtype=np.float64)
+    if bin_edges.ndim != 2 or bin_edges.shape[1] != 2:
+        raise ValueError(f"bin_edges must have shape (nbin, 2), got {bin_edges.shape}")
+    if bin_edges.shape[0] == 0:
+        raise ValueError("bin_edges must contain at least one bin")
+    if not np.all(np.isfinite(bin_edges)):
+        raise ValueError("bin_edges must contain only finite values")
+    if np.any(bin_edges[:, 0] >= bin_edges[:, 1]):
+        raise ValueError("each bin edge pair must satisfy low < high")
+    if np.any(np.diff(bin_edges[:, 0]) <= 0.0):
+        raise ValueError("bin_edges must be ordered by increasing lower edge")
+    if np.any(bin_edges[:-1, 1] > bin_edges[1:, 0]):
+        raise ValueError("bin_edges must not overlap")
+    return bin_edges
+
+
+def _bin_centers_from_edges(bin_edges):
+    bin_edges = np.asarray(bin_edges, dtype=np.float64)
+    return 0.5 * (bin_edges[:, 0] + bin_edges[:, 1])
+
+
+def _double_gauss_points_weights(order=4, gfrac=0.95):
+    order = int(order)
+    gfrac = float(gfrac)
+    if order <= 0:
+        raise ValueError("order must be a positive integer")
+    if not np.isfinite(gfrac) or not (0.0 < gfrac < 1.0):
+        raise ValueError("gfrac must be finite and strictly between 0 and 1")
+
+    g, w = np.polynomial.legendre.leggauss(order)
+    wnew1 = gfrac * w * 0.5
+    gnew1 = gfrac * 0.5 * (g + 1.0)
+    wnew2 = (1.0 - gfrac) * w * 0.5
+    gnew2 = gfrac + (1.0 - gfrac) * 0.5 * (g + 1.0)
+    return np.concatenate((gnew1, gnew2)), np.concatenate((wnew1, wnew2))
+
+
 def _normalize_species_selection(selection):
     if selection is None:
         return None
@@ -157,16 +215,23 @@ def _finalize_binned_row(sum_row, count_row, wavelengths, log10_floor):
 
 def _prepare_wavelength_chunks(source_wavelengths, target_bin_edges, target_wavelengths, source_chunk_wavelengths):
     chunks = []
+    target_lows = target_bin_edges[:, 0]
+    target_highs = target_bin_edges[:, 1]
     for w0 in range(0, source_wavelengths.size, source_chunk_wavelengths):
         w1 = min(w0 + source_chunk_wavelengths, source_wavelengths.size)
         wavelength_chunk = source_wavelengths[w0:w1]
         if wavelength_chunk.size == 0:
             continue
-        valid = (wavelength_chunk >= target_bin_edges[0, 0]) & (wavelength_chunk <= target_bin_edges[-1, 1])
+        bin_ids = np.searchsorted(target_lows, wavelength_chunk, side="right") - 1
+        valid = (
+            (bin_ids >= 0)
+            & (bin_ids < target_wavelengths.size)
+            & (wavelength_chunk >= target_lows[bin_ids])
+            & (wavelength_chunk <= target_highs[bin_ids])
+        )
         if not np.any(valid):
             continue
-        bin_ids = np.searchsorted(target_bin_edges[:, 1], wavelength_chunk, side="right")
-        bin_ids = np.minimum(bin_ids, target_wavelengths.size - 1)[valid]
+        bin_ids = bin_ids[valid]
         bin_counts = np.bincount(bin_ids, minlength=target_wavelengths.size).astype(np.uint32)
         chunks.append((w0, w1, np.flatnonzero(valid), bin_ids, bin_counts))
     return chunks
@@ -250,6 +315,149 @@ def _process_row_block(
             y_min = min(y_min, float(np.min(log_row)))
             y_max = max(y_max, float(np.max(log_row)))
             out[output_index] = log_row.astype(np.float32)
+            bar.update(1)
+    out.attrs["y_min"] = np.float64(y_min)
+    out.attrs["y_max"] = np.float64(y_max)
+
+
+def _finalize_ck_row(row_values, count_row, wavelengths, log10_floor):
+    values = np.asarray(row_values, dtype=np.float64)
+    valid = count_row > 0
+    if np.any(valid):
+        if np.any(~valid):
+            for ig in range(values.shape[1]):
+                values[~valid, ig] = np.interp(wavelengths[~valid], wavelengths[valid], values[valid, ig])
+        values = np.maximum(values, float(log10_floor))
+        return values
+
+    values.fill(float(log10_floor))
+    return values
+
+
+def _accumulate_ck_row(dataset, row_index, wavelength_chunks, target_wavelengths, g_points, log10_floor):
+    target_size = target_wavelengths.size
+    ng = g_points.size
+    sample_chunks = [[] for _ in range(target_size)]
+    count_row = np.zeros(target_size, dtype=np.uint32)
+
+    for w0, w1, valid_indices, bin_ids, bin_counts in wavelength_chunks:
+        raw_block = dataset[(slice(w0, w1),) + row_index]
+        row_values = _decode_log10_opacity_block(raw_block[valid_indices], dataset)
+        if row_values.size == 0:
+            continue
+
+        count_row += bin_counts
+        if row_values.size == 1:
+            bin_id = int(bin_ids[0])
+            sample_chunks[bin_id].append(
+                np.asarray([np.log10(max(float(row_values[0]), float(log10_floor)))], dtype=np.float64)
+            )
+            continue
+
+        split_points = np.flatnonzero(np.diff(bin_ids)) + 1
+        unique_bins = bin_ids[np.r_[0, split_points]]
+        for bin_id, values in zip(unique_bins, np.split(row_values, split_points)):
+            values = np.log10(np.maximum(np.asarray(values, dtype=np.float64), float(log10_floor)))
+            sample_chunks[int(bin_id)].append(values)
+
+    out_row = np.full((target_size, ng), np.log10(float(log10_floor)), dtype=np.float64)
+    for i_bin, chunks in enumerate(sample_chunks):
+        if not chunks:
+            continue
+        data = np.concatenate(chunks)
+        data.sort()
+        if data.size == 1:
+            out_row[i_bin, :] = data[0]
+            continue
+        x = np.linspace(0.0, 1.0, data.size)
+        out_row[i_bin, :] = np.interp(g_points, x, data)
+
+    return _finalize_ck_row(out_row, count_row, target_wavelengths, np.log10(float(log10_floor)))
+
+
+def _process_ck_row_block(
+    dataset,
+    out,
+    row_specs,
+    wavelength_chunks,
+    target_wavelengths,
+    g_points,
+    log10_floor,
+    storage_format,
+    verbose,
+    desc,
+):
+    if storage_format == "log10_uint16":
+        y_min = np.inf
+        y_max = -np.inf
+        with tqdm(
+            total=len(row_specs),
+            disable=not verbose,
+            desc=desc,
+            unit="row",
+            leave=False,
+        ) as bar:
+            for _, source_index in row_specs:
+                row_values = _accumulate_ck_row(
+                    dataset,
+                    source_index,
+                    wavelength_chunks,
+                    target_wavelengths,
+                    g_points,
+                    log10_floor,
+                )
+                y_min = min(y_min, float(np.min(row_values)))
+                y_max = max(y_max, float(np.max(row_values)))
+                bar.update(1)
+
+        scale = 0.0 if y_max == y_min else float(np.iinfo(np.uint16).max) / (y_max - y_min)
+        out.attrs["y_min"] = np.float64(y_min)
+        out.attrs["y_max"] = np.float64(y_max)
+        with tqdm(
+            total=len(row_specs),
+            disable=not verbose,
+            desc=desc,
+            unit="row",
+            leave=False,
+        ) as bar:
+            for output_index, source_index in row_specs:
+                row_values = _accumulate_ck_row(
+                    dataset,
+                    source_index,
+                    wavelength_chunks,
+                    target_wavelengths,
+                    g_points,
+                    log10_floor,
+                )
+                if scale == 0.0:
+                    encoded = np.zeros_like(row_values, dtype=np.uint16)
+                else:
+                    encoded = np.rint((row_values - y_min) * scale).astype(np.uint16)
+                out[output_index] = encoded
+                bar.update(1)
+        return
+
+    y_min = np.inf
+    y_max = -np.inf
+    with tqdm(
+        total=len(row_specs),
+        disable=not verbose,
+        desc=desc,
+        unit="row",
+        leave=False,
+    ) as bar:
+        for output_index, source_index in row_specs:
+            row_values = _accumulate_ck_row(
+                dataset,
+                source_index,
+                wavelength_chunks,
+                target_wavelengths,
+                g_points,
+                log10_floor,
+            )
+            y_min = min(y_min, float(np.min(row_values)))
+            y_max = max(y_max, float(np.max(row_values)))
+            out[output_index] = row_values.astype(np.float32)
             bar.update(1)
     out.attrs["y_min"] = np.float64(y_min)
     out.attrs["y_max"] = np.float64(y_max)
@@ -584,6 +792,289 @@ def opacity_dir_to_hdf5(
                 row_specs = _select_continuum_row_specs(continuum_temperature_indices)
                 source_y_min = dataset.attrs.get("y_min")
                 source_y_max = dataset.attrs.get("y_max")
+                _process_row_block(
+                    dataset,
+                    out,
+                    row_specs,
+                    wavelength_chunks,
+                    target_wavelengths,
+                    continuum_log10_floor,
+                    storage_format,
+                    verbose,
+                    meta["continuum_name"],
+                    source_y_min=source_y_min,
+                    source_y_max=source_y_max,
+                )
+
+
+def opacity_dir_to_correlated_k_hdf5(
+    opacity_dir,
+    output_hdf5,
+    bin_edges,
+    compression="lzf",
+    shuffle=True,
+    storage_format="log10_float32",
+    molecular_species=None,
+    continuum_species=None,
+    temperature_range=None,
+    pressure_range=None,
+    source_chunk_wavelengths=65536,
+    molecular_log10_floor=1e-50,
+    continuum_log10_floor=1e-100,
+    g_order=4,
+    gfrac=0.95,
+    verbose=True,
+):
+    """Convert an opacity directory to a correlated-k HDF5 layout.
+
+    The source directory must contain a ``grid.h5`` file and one ``.h5`` file
+    per opacity species. Molecular files are expected to contain 3D opacity
+    cubes with axes ``(wavelength, temperature, pressure)``. Continuum files
+    are expected to contain 2D opacity tables with axes
+    ``(wavelength, temperature)``.
+
+    The output keeps the same header / group organization as the resampled
+    writer, but adds explicit ``bin_edges`` together with shared ``g_points``
+    and ``g_weights`` arrays.
+    """
+    opacity_dir = Path(opacity_dir)
+    output_hdf5 = Path(output_hdf5)
+
+    if storage_format not in {"log10_uint16", "log10_float32"}:
+        raise ValueError(f"Unsupported storage_format: {storage_format!r}")
+    if compression not in {"lzf", None}:
+        raise ValueError(f"Unsupported compression: {compression!r}")
+    if not isinstance(source_chunk_wavelengths, int) or source_chunk_wavelengths <= 0:
+        raise ValueError("source_chunk_wavelengths must be a positive integer")
+    grid = _read_opacity_grid(opacity_dir / "grid.h5")
+    source_wavelengths = grid["wavelengths"]
+    source_min = float(np.min(source_wavelengths))
+    source_max = float(np.max(source_wavelengths))
+    molecular_temperature_indices = _select_range_indices(
+        grid["molecular_temperatures"], temperature_range, "temperature"
+    )
+    continuum_temperature_indices = _select_range_indices(
+        grid["continuum_temperatures"], temperature_range, "temperature"
+    )
+    pressure_indices = _select_range_indices(grid["pressures"], pressure_range, "pressure")
+    target_bin_edges = _validate_bin_edges(bin_edges)
+    target_wavelengths = _bin_centers_from_edges(target_bin_edges)
+    g_points, g_weights = _double_gauss_points_weights(g_order, gfrac)
+
+    if target_bin_edges[0, 0] < source_min or target_bin_edges[-1, 1] > source_max:
+        raise ValueError(
+            "bin_edges extend beyond the source wavelength grid: "
+            f"source range is [{source_min}, {source_max}], "
+            f"but bin_edges span [{target_bin_edges[0, 0]}, {target_bin_edges[-1, 1]}]"
+        )
+    wavelength_chunks = _prepare_wavelength_chunks(
+        source_wavelengths, target_bin_edges, target_wavelengths, source_chunk_wavelengths
+    )
+
+    available = _discover_opacity_species(opacity_dir)
+    molecular_requested = _normalize_species_selection(molecular_species)
+    continuum_requested = _normalize_species_selection(continuum_species)
+
+    molecular_sources = [item for item in available if item["kind"] == "molecular"]
+    continuum_sources = [item for item in available if item["kind"] == "continuum"]
+
+    if molecular_requested is not None:
+        molecular_sources = [item for item in molecular_sources if item["species_name"] in molecular_requested]
+        missing = molecular_requested - {item["species_name"] for item in available if item["kind"] == "molecular"}
+        if missing:
+            raise ValueError(f"Requested molecular species not found: {sorted(missing)!r}")
+    if continuum_requested is not None:
+        continuum_sources = [item for item in continuum_sources if item["species_name"] in continuum_requested]
+        missing = continuum_requested - {item["species_name"] for item in available if item["kind"] == "continuum"}
+        if missing:
+            raise ValueError(f"Requested continuum species not found: {sorted(missing)!r}")
+
+    if not molecular_sources and not continuum_sources:
+        raise ValueError("No molecular or continuum opacities were selected")
+
+    molecular_sources = sorted(molecular_sources, key=lambda item: item["species_name"])
+    continuum_sources = sorted(continuum_sources, key=lambda item: item["species_name"])
+    continuum_metadata = [
+        _continuum_metadata_from_source_name(item["species_name"], item["opacity_unit"] or "cm-1 amagat^-2")
+        for item in continuum_sources
+    ]
+
+    molecular_unit = molecular_sources[0]["opacity_unit"] if molecular_sources else "cm2/molecule"
+    continuum_unit = continuum_sources[0]["opacity_unit"] if continuum_sources else ""
+    if molecular_sources and any(item["opacity_unit"] != molecular_unit for item in molecular_sources):
+        raise ValueError("All selected molecular files must use the same opacity_unit")
+    if continuum_sources and any(item["opacity_unit"] != continuum_unit for item in continuum_sources):
+        raise ValueError("All selected continuum files must use the same opacity_unit")
+
+    if verbose:
+        print(
+            f"Writing {output_hdf5} with {len(molecular_sources)} molecular and "
+            f"{len(continuum_sources)} continuum species"
+        )
+
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(output_hdf5, "w") as f:
+        header = f.create_group("header")
+        header.create_dataset("format_version", data=np.asarray("1.0", dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset("opacity_type", data=np.asarray("correlated-k", dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset("storage_format", data=np.asarray(storage_format, dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset(
+            "molecular_names",
+            data=np.asarray([item["species_name"] for item in molecular_sources], dtype=object),
+            dtype=string_dtype,
+        )
+        header.create_dataset(
+            "continuum_names",
+            data=np.asarray([item["continuum_name"] for item in continuum_metadata], dtype=object),
+            dtype=string_dtype,
+        )
+        header.create_dataset("pressure_unit", data=np.asarray(grid["pressure_unit"], dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset(
+            "temperature_unit", data=np.asarray(grid["temperature_unit"], dtype=string_dtype), dtype=string_dtype
+        )
+        header.create_dataset("wavelength_unit", data=np.asarray(grid["wavelength_unit"], dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset("molecular_unit", data=np.asarray(molecular_unit, dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset("continuum_unit", data=np.asarray(continuum_unit, dtype=string_dtype), dtype=string_dtype)
+        header.create_dataset("molecular_log10_floor", data=np.float64(molecular_log10_floor))
+        header.create_dataset("continuum_log10_floor", data=np.float64(continuum_log10_floor))
+        header.create_dataset("pressure", data=np.asarray(grid["pressures"][pressure_indices], dtype=np.float64))
+        header.create_dataset(
+            "temperature", data=np.asarray(grid["molecular_temperatures"][molecular_temperature_indices], dtype=np.float64)
+        )
+        header.create_dataset(
+            "continuum_temperatures",
+            data=np.asarray(grid["continuum_temperatures"][continuum_temperature_indices], dtype=np.float64),
+        )
+        header.create_dataset("wavelength", data=np.asarray(target_wavelengths, dtype=np.float64))
+        header.create_dataset("bin_edges", data=np.asarray(target_bin_edges, dtype=np.float64))
+        header.create_dataset("g_points", data=np.asarray(g_points, dtype=np.float64))
+        header.create_dataset("g_weights", data=np.asarray(g_weights, dtype=np.float64))
+
+        molecular_group = f.create_group("molecular")
+        total_molecules = len(molecular_sources)
+        for index, item in enumerate(molecular_sources, start=1):
+            species_name = item["species_name"]
+            if verbose:
+                print(f"[molecular {index}/{total_molecules}] Writing {species_name}")
+            with h5py.File(item["path"], "r") as source:
+                dataset = source["opacity"]
+                if dataset.ndim != 3:
+                    raise ValueError(f"Molecular file {item['path']} must be 3D")
+                nw_src, nt_src, np_src = dataset.shape
+                if nw_src != source_wavelengths.size:
+                    raise ValueError(
+                        f"Molecular file {item['path']} has {nw_src} wavelengths, expected {source_wavelengths.size}"
+                    )
+                if nt_src != grid["molecular_temperatures"].size or np_src != grid["pressures"].size:
+                    raise ValueError(
+                        f"Molecular file {item['path']} has unexpected PT dimensions {dataset.shape[1:]}"
+                    )
+
+                out_shape = (
+                    pressure_indices.size,
+                    molecular_temperature_indices.size,
+                    target_wavelengths.size,
+                    g_points.size,
+                )
+                dataset_kwargs = {}
+                if compression is not None:
+                    dataset_kwargs["compression"] = compression
+                    dataset_kwargs["shuffle"] = shuffle
+                    dataset_kwargs["chunks"] = (1, 1, min(target_wavelengths.size, 4096), g_points.size)
+                elif shuffle:
+                    dataset_kwargs["shuffle"] = True
+
+                out = molecular_group.create_dataset(
+                    species_name,
+                    shape=out_shape,
+                    dtype=np.uint16 if storage_format == "log10_uint16" else np.float32,
+                    **dataset_kwargs,
+                )
+                out.attrs["axes"] = "pressure,temperature,wavelength,g"
+                out.attrs["encoding"] = storage_format
+                out.attrs["log10_floor"] = float(molecular_log10_floor)
+                out.attrs["opacity_unit"] = "cm2/molecule"
+                out.attrs["species"] = species_name
+                row_specs = _select_molecular_row_specs(pressure_indices, molecular_temperature_indices)
+                _process_ck_row_block(
+                    dataset,
+                    out,
+                    row_specs,
+                    wavelength_chunks,
+                    target_wavelengths,
+                    g_points,
+                    molecular_log10_floor,
+                    storage_format,
+                    verbose,
+                    species_name,
+                )
+
+        continuum_group = f.create_group("continuum")
+        total_continuum = len(continuum_sources)
+        for index, (item, meta) in enumerate(zip(continuum_sources, continuum_metadata), start=1):
+            species_name = item["species_name"]
+            if verbose:
+                print(f"[continuum {index}/{total_continuum}] Writing {meta['continuum_name']}")
+            with h5py.File(item["path"], "r") as source:
+                dataset = source["opacity"]
+                if dataset.ndim != 2:
+                    raise ValueError(f"Continuum file {item['path']} must be 2D")
+                nw_src, nt_src = dataset.shape
+                if nw_src != source_wavelengths.size:
+                    raise ValueError(
+                        f"Continuum file {item['path']} has {nw_src} wavelengths, expected {source_wavelengths.size}"
+                    )
+                if nt_src != grid["continuum_temperatures"].size:
+                    raise ValueError(
+                        f"Continuum file {item['path']} has unexpected temperature dimension {dataset.shape[1]}"
+                    )
+
+                out_shape = (continuum_temperature_indices.size, target_wavelengths.size)
+                dataset_kwargs = {}
+                if compression is not None:
+                    dataset_kwargs["compression"] = compression
+                    dataset_kwargs["shuffle"] = shuffle
+                    dataset_kwargs["chunks"] = (1, min(target_wavelengths.size, 4096))
+                elif shuffle:
+                    dataset_kwargs["shuffle"] = True
+
+                out = continuum_group.create_dataset(
+                    meta["continuum_name"],
+                    shape=out_shape,
+                    dtype=np.uint16 if storage_format == "log10_uint16" else np.float32,
+                    **dataset_kwargs,
+                )
+                out.attrs["axes"] = "temperature,wavelength"
+                out.attrs["encoding"] = storage_format
+                out.attrs["log10_floor"] = float(continuum_log10_floor)
+                out.attrs["continuum_type"] = meta["continuum_type"]
+                out.attrs["primary_species"] = meta["primary_species"]
+                if meta["secondary_species"] is not None:
+                    out.attrs["secondary_species"] = meta["secondary_species"]
+                out.attrs["opacity_unit"] = meta["opacity_unit"]
+                out.attrs["species"] = meta["continuum_name"]
+                row_specs = _select_continuum_row_specs(continuum_temperature_indices)
+
+                if storage_format == "log10_uint16":
+                    cont_y_min = np.inf
+                    cont_y_max = -np.inf
+                    for _, source_index in row_specs:
+                        row_values = _accumulate_binned_row(
+                            dataset,
+                            source_index,
+                            wavelength_chunks,
+                            target_wavelengths,
+                            continuum_log10_floor,
+                        )
+                        log_row = np.log10(row_values)
+                        cont_y_min = min(cont_y_min, float(np.min(log_row)))
+                        cont_y_max = max(cont_y_max, float(np.max(log_row)))
+                    source_y_min = np.float64(cont_y_min)
+                    source_y_max = np.float64(cont_y_max)
+                else:
+                    source_y_min = None
+                    source_y_max = None
+
                 _process_row_block(
                     dataset,
                     out,
