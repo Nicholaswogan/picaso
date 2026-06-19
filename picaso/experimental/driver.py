@@ -27,7 +27,7 @@ from .rayleigh import (
     RAYLEIGH_MOLECULES,
 )
 from .raman import compute_raman
-from .opacityfiles import _decode_hdf5_string
+from .opacityfiles import _bin_centers_from_edges, _decode_hdf5_string
 
 # Comment below helps ignore type checking false-positives.
 # pyright: reportInvalidTypeForm=false
@@ -705,6 +705,26 @@ def _read_hdf5_attr_scalar(obj, name, filename, default=_MISSING):
     return value
 
 
+def _decode_ck_log10_opacity_block(raw_block, dataset):
+    encoding = _decode_hdf5_string(dataset.attrs["encoding"]).lower()
+    raw_block = np.asarray(raw_block)
+
+    if encoding == "log10_uint16":
+        y_min = float(dataset.attrs["y_min"])
+        y_max = float(dataset.attrs["y_max"])
+        if y_max == y_min:
+            return np.full(raw_block.shape, y_min, dtype=np.float64)
+        scale = (y_max - y_min) / float(np.iinfo(np.uint16).max)
+        return y_min + raw_block.astype(np.float64) * scale
+
+    if encoding == "log10_float32":
+        return raw_block.astype(np.float64)
+
+    raise ValueError(
+        f"unsupported source encoding {encoding!r}; expected 'log10_uint16' or 'log10_float32'"
+    )
+
+
 def _infer_bin_edges_from_centers(wavelength):
     if not isinstance(wavelength, np.ndarray):
         wavelength = np.asarray(wavelength, dtype=np.float64)
@@ -725,6 +745,415 @@ def _infer_bin_edges_from_centers(wavelength):
     bin_edges[-1, 1] = wavelength[-1] + 0.5 * (wavelength[-1] - wavelength[-2])
     return bin_edges
 
+
+def _make_radtran_opacities(opacity_filename, wavelength_range, opacity_cache_size_limit):
+    if not isinstance(opacity_filename, (str, Path)):
+        raise TypeError(
+            f"opacity_filename must be a string path or Path, got {type(opacity_filename)!r}"
+        )
+
+    opacity_filename = str(opacity_filename)
+    if not h5py.is_hdf5(opacity_filename):
+        raise ValueError(f"{opacity_filename!r} is not a valid HDF5 file")
+
+    with h5py.File(opacity_filename, "r") as file:
+        opacity_type = _read_hdf5_scalar(file["header"], "opacity_type", opacity_filename)
+
+    opacity_type = str(opacity_type).lower()
+    if opacity_type == "correlated-k":
+        return RadtranOpacitiesCK(opacity_filename, wavelength_range, opacity_cache_size_limit)
+    if opacity_type == "molecular+continuum":
+        return RadtranOpacities(opacity_filename, wavelength_range, opacity_cache_size_limit)
+
+    raise ValueError(
+        f"{opacity_filename!r} has unsupported opacity_type {opacity_type!r}; "
+        "expected 'molecular+continuum' or 'correlated-k'"
+    )
+
+
+
+class RadtranOpacitiesCK:
+
+    def __init__(self, opacity_filename, wavelength_range, opacity_cache_size_limit):
+        if not isinstance(opacity_filename, (str, Path)):
+            raise TypeError(
+                f"opacity_filename must be a string path or Path, got {type(opacity_filename)!r}"
+            )
+
+        self.opacity_filename = str(opacity_filename)
+        if not h5py.is_hdf5(self.opacity_filename):
+            raise ValueError(f"{self.opacity_filename!r} is not a valid HDF5 file")
+
+        self.opacity_cache_size_limit = opacity_cache_size_limit
+
+        with h5py.File(self.opacity_filename, "r") as file:
+            header = file["header"]
+            molecular_group = file["molecular"]
+            continuum_group = file["continuum"]
+
+            opacity_type = _read_hdf5_scalar(header, "opacity_type", self.opacity_filename)
+            if str(opacity_type).lower() != "correlated-k":
+                raise ValueError(
+                    f"{self.opacity_filename!r} has opacity_type {opacity_type!r}; "
+                    "expected 'correlated-k'"
+                )
+
+            self.storage_format = str(_read_hdf5_scalar(header, "storage_format", self.opacity_filename))
+            if self.storage_format not in {"log10_uint16", "log10_float32"}:
+                raise ValueError(
+                    f"unsupported storage_format {self.storage_format!r}; "
+                    "expected 'log10_uint16' or 'log10_float32'"
+                )
+
+            pressure = np.asarray(header["pressure"][:], dtype=np.float64)
+            temperature = np.asarray(header["temperature"][:], dtype=np.float64)
+            continuum_temperatures = np.asarray(header["continuum_temperatures"][:], dtype=np.float64)
+            wavelength = np.asarray(header["wavelength"][:], dtype=np.float64)
+            bin_edges = np.asarray(header["bin_edges"][:], dtype=np.float64)
+            g_points = np.asarray(header["g_points"][:], dtype=np.float64)
+            g_weights = np.asarray(header["g_weights"][:], dtype=np.float64)
+
+            if wavelength.ndim != 1:
+                raise ValueError(f"header/wavelength must be 1D, got shape {wavelength.shape}")
+            if bin_edges.shape != (wavelength.size, 2):
+                raise ValueError(
+                    f"header/bin_edges must have shape ({wavelength.size}, 2), got {bin_edges.shape}"
+                )
+            if not np.allclose(_bin_centers_from_edges(bin_edges), wavelength):
+                raise ValueError("header/bin_edges are not consistent with header/wavelength")
+            if g_points.ndim != 1 or g_weights.ndim != 1 or g_points.size != g_weights.size:
+                raise ValueError(
+                    "header/g_points and header/g_weights must be 1D arrays with the same length"
+                )
+            if not np.all(np.isfinite(g_points)) or not np.all(np.isfinite(g_weights)):
+                raise ValueError("header/g_points and header/g_weights must contain only finite values")
+
+            molecular_names = [str(name) for name in _decode_hdf5_string(header["molecular_names"][:])]
+            continuum_names = [str(name) for name in _decode_hdf5_string(header["continuum_names"][:])]
+
+            if wavelength_range is not None:
+                if len(wavelength_range) != 2:
+                    raise ValueError(
+                        "wavelength_range must be a (min_wavelength, max_wavelength) pair"
+                    )
+                wmin = float(wavelength_range[0])
+                wmax = float(wavelength_range[1])
+                if not np.isfinite(wmin) or not np.isfinite(wmax):
+                    raise ValueError("wavelength_range must contain finite values")
+                if wmin > wmax:
+                    raise ValueError(
+                        f"wavelength_range minimum must not exceed maximum, got {wmin} > {wmax}"
+                    )
+                selected = np.flatnonzero((wavelength >= wmin) & (wavelength <= wmax))
+                if selected.size == 0:
+                    raise ValueError(
+                        f"wavelength_range {wavelength_range!r} selects no wavelengths from the file"
+                    )
+                if selected.size > 1 and np.any(np.diff(selected) != 1):
+                    raise ValueError("wavelength_range must select a contiguous block of wavelengths")
+            else:
+                selected = np.arange(wavelength.size, dtype=np.int64)
+
+            self.wavelength = wavelength[selected]
+            self.bin_edges = bin_edges[selected]
+            self.nwavelength = int(self.wavelength.size)
+            self.ngauss = int(g_points.size)
+
+            self.pressure = pressure
+            self.temperature = temperature
+            self.continuum_temperatures = continuum_temperatures
+            self.npressure = int(pressure.size)
+            self.ntemperature = int(temperature.size)
+            self.ncontinuum_temperature = int(continuum_temperatures.size)
+
+            self.molecular_names = molecular_names
+            self.continuum_names = continuum_names
+            self.nmolecular = int(len(molecular_names))
+            self.ncontinuum = int(len(continuum_names))
+            self.molecular_name_to_index = {name: i for i, name in enumerate(molecular_names)}
+            self.continuum_name_to_index = {name: i for i, name in enumerate(continuum_names)}
+
+            self.g_points = g_points
+            self.g_weights = g_weights
+
+            self.molecular_unit = str(_read_hdf5_scalar(header, "molecular_unit", self.opacity_filename))
+            self.continuum_unit = str(_read_hdf5_scalar(header, "continuum_unit", self.opacity_filename))
+
+            if self.nmolecular:
+                self.molecular_tables = np.empty(
+                    (self.nmolecular, self.npressure, self.ntemperature, self.nwavelength, self.ngauss),
+                    dtype=np.float64,
+                )
+            else:
+                self.molecular_tables = np.empty((0, self.npressure, self.ntemperature, self.nwavelength, self.ngauss), dtype=np.float64)
+
+            self.continuum_tables = np.empty(
+                (self.ncontinuum, self.ncontinuum_temperature, self.nwavelength),
+                dtype=np.float64,
+            )
+
+            self.continuum_types = []
+            self.continuum_primary_species = []
+            self.continuum_secondary_species = []
+            self.continuum_opacity_units = []
+
+            for i, name in enumerate(self.molecular_names):
+                dataset = molecular_group[name]
+                if dataset.ndim != 4:
+                    raise ValueError(f"molecular dataset {name!r} must have rank 4, got shape {dataset.shape}")
+                if dataset.shape != (self.npressure, self.ntemperature, wavelength.size, self.ngauss):
+                    raise ValueError(
+                        f"molecular dataset {name!r} has shape {dataset.shape}, "
+                        f"expected {(self.npressure, self.ntemperature, wavelength.size, self.ngauss)}"
+                    )
+                raw = dataset[:, :, selected, :]
+                self.molecular_tables[i] = np.asarray(
+                    _decode_ck_log10_opacity_block(raw, dataset),
+                    dtype=np.float64,
+                )
+
+            for i, name in enumerate(self.continuum_names):
+                dataset = continuum_group[name]
+                if dataset.ndim != 2:
+                    raise ValueError(f"continuum dataset {name!r} must have rank 2, got shape {dataset.shape}")
+                if dataset.shape != (self.ncontinuum_temperature, wavelength.size):
+                    raise ValueError(
+                        f"continuum dataset {name!r} has shape {dataset.shape}, "
+                        f"expected {(self.ncontinuum_temperature, wavelength.size)}"
+                    )
+                raw = dataset[:, selected]
+                self.continuum_tables[i] = np.asarray(
+                    _decode_ck_log10_opacity_block(raw, dataset),
+                    dtype=np.float64,
+                )
+
+                continuum_type = str(_read_hdf5_attr_scalar(dataset, "continuum_type", self.opacity_filename)).lower()
+                primary_species = str(_read_hdf5_attr_scalar(dataset, "primary_species", self.opacity_filename))
+                secondary_species = _read_hdf5_attr_scalar(
+                    dataset,
+                    "secondary_species",
+                    self.opacity_filename,
+                    default=None,
+                )
+                opacity_unit = str(_read_hdf5_attr_scalar(dataset, "opacity_unit", self.opacity_filename))
+
+                if continuum_type not in {"cia", "cross_section"}:
+                    raise ValueError(
+                        f"continuum dataset {name!r} has unsupported continuum_type {continuum_type!r}; "
+                        "expected 'cia' or 'cross_section'"
+                    )
+
+                self.continuum_types.append(continuum_type)
+                self.continuum_primary_species.append(primary_species)
+                self.continuum_secondary_species.append(None if secondary_species is None else str(secondary_species))
+                self.continuum_opacity_units.append(opacity_unit)
+
+        if self.nmolecular and self.molecular_unit != "cm2/molecule":
+            raise ValueError(
+                f"unsupported molecular_unit {self.molecular_unit!r}; expected 'cm2/molecule'"
+            )
+        if self.ncontinuum and self.continuum_unit == "":
+            raise ValueError("continuum_unit must not be empty when continuum data are present")
+
+        self.opacity_type = "correlated-k"
+
+        self.workspace = RadtranOpacitiesWorkspace()
+
+    def _prepare_cloud_interpolation(self, clouds: Clouds):
+        if clouds is None or not clouds.interpolate:
+            return
+
+        _fill_cloud_interpolation_workspace(
+            clouds.wavelength,
+            self.wavelength,
+            self.workspace.cloud_wavelength_ind0,
+            self.workspace.cloud_wavelength_ind1,
+            self.workspace.cloud_wavelength_weight,
+        )
+
+    def prepare_interpolation(self, atmosphere: RadtranAtmosphere, clouds: Clouds, nwavelengths_per_chunk: int):
+        self.workspace._ensure(
+            atmosphere.nlayers,
+            self.npressure,
+            self.ntemperature,
+            self.ncontinuum_temperature,
+            self.nwavelength,
+            nwavelengths_per_chunk,
+        )
+
+        _fill_molecular_interpolation_workspace(
+            atmosphere,
+            self.pressure,
+            self.temperature,
+            self.workspace,
+        )
+        _fill_continuum_interpolation_workspace(
+            atmosphere,
+            self.continuum_temperatures,
+            self.workspace,
+        )
+        self._prepare_cloud_interpolation(clouds)
+
+    def compute_opacity(
+        self, 
+        atmosphere: RadtranAtmosphere, 
+        settings: RadtranSettings, 
+        clouds: Clouds, 
+        surface: Surface, 
+        ind_wv0: int, 
+        ind_wv1: int, 
+        opacities_result: RadtranOpacitiesResult
+    ):  
+        # Width of the wavelength chunk
+        chunk_width = ind_wv1 - ind_wv0
+
+        # Ensure we have the right allocated workspace.
+        opacities_result._ensure(atmosphere.nlayers, self.ngauss, self.workspace.nwavelengths_per_chunk)
+
+        # Gauss weights
+        opacities_result.ck_weights[: self.ngauss] = self.g_weights
+
+        # Wavelengths and surface reflectance
+        opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
+        if np.isscalar(surface.reflectance):
+            opacities_result.surf_reflect[:chunk_width] = float(surface.reflectance)
+        else:
+            opacities_result.surf_reflect[:chunk_width] = surface.reflectance[ind_wv0:ind_wv1]
+
+        #~~ Molecular opacities ~~#
+        active_species = []
+        active_tables = []
+        for i_species in range(atmosphere.nspecies):
+            species_name = str(atmosphere.species_names[i_species])
+            table_index = self.molecular_name_to_index.get(species_name)
+            if table_index is None:
+                continue
+            active_species.append(i_species)
+            active_tables.append(table_index)
+        active_species_indices = np.asarray(active_species, dtype=np.int64)
+        active_table_indices = np.asarray(active_tables, dtype=np.int64)
+
+        _compute_ck_molecular_taugas(
+            self.molecular_tables,
+            active_species_indices,
+            active_table_indices,
+            atmosphere.layer_mixing_ratios,
+            atmosphere.layer_colden,
+            atmosphere.layer_mubar,
+            self.workspace.molecular_pressure_ind0,
+            self.workspace.molecular_pressure_ind1,
+            self.workspace.molecular_pressure_weight,
+            self.workspace.molecular_temperature_ind0,
+            self.workspace.molecular_temperature_ind1,
+            self.workspace.molecular_temperature_weight,
+            self.workspace.molecular_pair_pindex,
+            self.workspace.molecular_pair_tindex,
+            self.g_points,
+            self.g_weights,
+            opacities_result.taugas[:chunk_width, :, :],
+        )
+
+        #~~ CIA & continuum ~~#
+        atmosphere_name_to_index = {str(name): i for i, name in enumerate(atmosphere.species_names)}
+        for i_continuum, continuum_name in enumerate(self.continuum_names):
+            continuum_type = self.continuum_types[i_continuum]
+            primary_species = self.continuum_primary_species[i_continuum]
+            secondary_species = self.continuum_secondary_species[i_continuum]
+            if primary_species not in atmosphere_name_to_index:
+                continue
+            i_primary = atmosphere_name_to_index[primary_species]
+
+            if continuum_type == "cia":
+                if secondary_species is None or secondary_species not in atmosphere_name_to_index:
+                    continue
+                i_secondary = atmosphere_name_to_index[secondary_species]
+                _fill_continuum_scale_workspace(atmosphere, i_primary, i_secondary, self.workspace)
+                continuum_scale_constant = CIA_AMAGAT_TO_MOLECULE_CM
+            elif continuum_type == "cross_section":
+                _fill_cross_section_scale_workspace(atmosphere, i_primary, self.workspace)
+                continuum_scale_constant = 1.0
+            else:
+                raise ValueError(
+                    f"unsupported continuum_type {continuum_type!r} for continuum {continuum_name!r}"
+                )
+
+            _add_ck_continuum_species_taugas(
+                self.continuum_tables[i_continuum],
+                continuum_scale_constant,
+                self.workspace.continuum_scale,
+                self.workspace.continuum_temperature_ind0,
+                self.workspace.continuum_temperature_ind1,
+                self.workspace.continuum_temperature_weight,
+                self.workspace.continuum_temperature_load_idx,
+                opacities_result.taugas[:chunk_width, :, :],
+            )
+
+        #~~ Rayleigh ~~#
+        tauray = opacities_result.tauray[:chunk_width, :]
+        tauray[:,:] = 0.0
+        rayleigh_sigma = self.workspace.rayleigh_sigma[:chunk_width]
+        wavelength_chunk = self.wavelength[ind_wv0:ind_wv1]
+        for i_species in range(atmosphere.nspecies):
+            species_name = str(atmosphere.species_names[i_species])
+            if species_name not in RAYLEIGH_MOLECULES:
+                continue
+            compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
+            _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
+
+        #~~ Raman ~~#
+        compute_raman(
+            settings.raman,
+            opacities_result.wavelength_um[:chunk_width],
+            opacities_result.raman_factor[:chunk_width],
+        )
+
+        #~~ Clouds ~~#
+        taucld = opacities_result.taucld[:chunk_width, :]
+        w0_cld = opacities_result.w0_cld[:chunk_width, :]
+        g0_cld = opacities_result.g0_cld[:chunk_width, :]
+        if clouds is not None:
+            _set_clouds(
+                clouds,
+                ind_wv0,
+                ind_wv1,
+                taucld,
+                w0_cld,
+                g0_cld,
+                self.workspace.cloud_wavelength_ind0[ind_wv0:ind_wv1],
+                self.workspace.cloud_wavelength_ind1[ind_wv0:ind_wv1],
+                self.workspace.cloud_wavelength_weight[ind_wv0:ind_wv1],
+            )
+        else:
+            taucld[:, :] = 0.0
+            w0_cld[:, :] = 0.0
+            g0_cld[:, :] = 0.0
+
+        # Finish up the calculation
+        _finish_compute_opacity(
+            opacities_result,
+            chunk_width,
+            self.ngauss,
+            settings.stream,
+            settings.delta_eddington,
+            fthin_cld=1.0,
+        )
+
+    def adjust_opacity_for_clearsky(self, clouds: Clouds, settings: RadtranSettings, ind_wv0: int, ind_wv1: int, opacities_result: RadtranOpacitiesResult):
+        if clouds is None or not clouds.do_holes:
+            raise ValueError("adjust_opacity_for_clearsky requires a cloud object with do_holes=True")
+
+        chunk_width = ind_wv1 - ind_wv0
+
+        _finish_compute_opacity(
+            opacities_result,
+            chunk_width,
+            self.ngauss,
+            settings.stream,
+            settings.delta_eddington,
+            clouds.fthin_cld,
+        )
+
+    
 
 class RadtranOpacities:
 
@@ -1396,6 +1825,180 @@ def _fill_cross_section_scale_workspace(atmosphere, i_primary_species, workspace
         workspace.continuum_scale[i] = atmosphere.layer_densities[i_primary_species, i] * atmosphere.layer_dz[i]
 
 
+@nb.njit(cache=True)
+def _ck_interp_log_table_row(table, p0, p1, t0, t1, pw, tw, iw, out):
+    c00 = (1.0 - pw) * (1.0 - tw)
+    c10 = pw * (1.0 - tw)
+    c01 = (1.0 - pw) * tw
+    c11 = pw * tw
+    ng = out.shape[0]
+    for ig in range(ng):
+        out[ig] = fast_pow10(
+            c00 * table[p0, t0, iw, ig]
+            + c10 * table[p1, t0, iw, ig]
+            + c01 * table[p0, t1, iw, ig]
+            + c11 * table[p1, t1, iw, ig]
+        )
+
+
+@nb.njit(cache=True)
+def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix):
+    mix_t = mix1 + mix2
+    ng = gauss_wts.shape[0]
+    if mix_t <= 0.0:
+        for i in range(ng):
+            k1[i] = 0.0
+        return 0.0
+
+    for i in range(ng):
+        for j in range(ng):
+            idx = i * ng + j
+            kmix[idx] = (mix1 * k1[i] + mix2 * k2[j]) / mix_t
+            wtsmix[idx] = gauss_wts[i] * gauss_wts[j]
+
+    sort_indices = np.argsort(kmix, kind="mergesort")
+    kmix_sort = np.maximum(kmix[sort_indices], 1.0e-300)
+    wtsmix_sort = wtsmix[sort_indices]
+    cumulative = np.cumsum(wtsmix_sort)
+    x = cumulative / cumulative[-1]
+    k1[:] = fast_pow10(np.interp(gauss_pts, x, np.log10(kmix_sort)))
+    return mix_t
+
+
+@nb.njit(cache=True)
+def _compute_ck_molecular_taugas(
+    molecular_tables,
+    active_species_indices,
+    active_table_indices,
+    layer_mixing_ratios,
+    layer_colden,
+    layer_mubar,
+    p_ind0,
+    p_ind1,
+    p_weight,
+    t_ind0,
+    t_ind1,
+    t_weight,
+    pair_pindex,
+    pair_tindex,
+    g_points,
+    g_weights,
+    taugas_out,
+):
+    nlayers = layer_mubar.shape[0]
+    nwavelengths = taugas_out.shape[0]
+    ngauss = g_points.shape[0]
+    nspecies = active_species_indices.shape[0]
+    mixed = np.empty(ngauss, dtype=np.float64)
+    tmp = np.empty(ngauss, dtype=np.float64)
+    kmix = np.empty(ngauss * ngauss, dtype=np.float64)
+    wtsmix = np.empty(ngauss * ngauss, dtype=np.float64)
+
+    for il in range(nlayers):
+        total_column = layer_colden[il] / (layer_mubar[il] * AMU_CGS)
+
+        row00 = p_ind0[il]
+        row10 = p_ind1[il]
+        row01 = t_ind0[il]
+        row11 = t_ind1[il]
+        p0 = pair_pindex[row00]
+        p1 = pair_pindex[row10]
+        t0 = pair_tindex[row01]
+        t1 = pair_tindex[row11]
+        pw = p_weight[il]
+        tw = t_weight[il]
+
+        if nspecies == 0:
+            for iw in range(nwavelengths):
+                for ig in range(ngauss):
+                    taugas_out[iw, ig, il] = 0.0
+            continue
+
+        if nspecies == 1:
+            table_index = active_table_indices[0]
+            for iw in range(nwavelengths):
+                _ck_interp_log_table_row(
+                    molecular_tables[table_index],
+                    p0,
+                    p1,
+                    t0,
+                    t1,
+                    pw,
+                    tw,
+                    iw,
+                    tmp,
+                )
+                for ig in range(ngauss):
+                    taugas_out[iw, ig, il] = tmp[ig] * total_column
+            continue
+
+        for iw in range(nwavelengths):
+            first = True
+            mix_total = 0.0
+            for ispecies in range(nspecies):
+                species_index = active_species_indices[ispecies]
+                table_index = active_table_indices[ispecies]
+                mix = layer_mixing_ratios[species_index, il]
+                _ck_interp_log_table_row(
+                    molecular_tables[table_index],
+                    p0,
+                    p1,
+                    t0,
+                    t1,
+                    pw,
+                    tw,
+                    iw,
+                    tmp,
+                )
+
+                if first:
+                    for ig in range(ngauss):
+                        mixed[ig] = tmp[ig]
+                    mix_total = mix
+                    first = False
+                else:
+                    mix_total = _ck_mix_2_gases(
+                        mixed,
+                        tmp,
+                        mix_total,
+                        mix,
+                        g_points,
+                        g_weights,
+                        kmix,
+                        wtsmix,
+                    )
+
+            for ig in range(ngauss):
+                taugas_out[iw, ig, il] = mixed[ig] * total_column
+
+
+@nb.njit(parallel=True, cache=True)
+def _add_ck_continuum_species_taugas(
+    continuum_table,
+    continuum_scale_constant,
+    continuum_scale_row,
+    t_ind0,
+    t_ind1,
+    t_weight,
+    load_index,
+    taugas_out,
+):
+    nwavelengths = taugas_out.shape[0]
+    ngauss = taugas_out.shape[1]
+    nlayers = taugas_out.shape[2]
+
+    for il in range(nlayers):
+        it0 = load_index[t_ind0[il]]
+        it1 = load_index[t_ind1[il]]
+        tw = t_weight[il]
+        c0 = 1.0 - tw
+        c1 = tw
+        add_scale = continuum_scale_constant * continuum_scale_row[il]
+        for iw in range(nwavelengths):
+            coeff = fast_pow10(c0 * continuum_table[it0, iw] + c1 * continuum_table[it1, iw]) * add_scale
+            for ig in range(ngauss):
+                taugas_out[iw, ig, il] += coeff
+
 @nb.njit
 def _accumulate_molecular_tau(block, columns_row, p_ind0, p_ind1, p_weight, t_ind0, t_ind1, t_weight, tau_out):
     nwavelengths = block.shape[1]
@@ -1894,7 +2497,7 @@ class Radtran:
     ):
 
         # Opacities
-        self.opacities = RadtranOpacities(opacity_filename, wavelength_range, opacity_cache_size_limit)
+        self.opacities = _make_radtran_opacities(opacity_filename, wavelength_range, opacity_cache_size_limit)
         self.opacities_result = RadtranOpacitiesResult()
 
         # Atmosphere
