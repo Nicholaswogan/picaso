@@ -237,6 +237,19 @@ def _prepare_wavelength_chunks(source_wavelengths, target_bin_edges, target_wave
     return chunks
 
 
+def _accumulate_interp_row(dataset, row_index, source_wavelengths, target_wavelengths, log10_floor):
+    raw_row = dataset[(slice(None),) + row_index]
+    row_values = _decode_log10_opacity_block(raw_row, dataset)
+    row_values = np.interp(
+        target_wavelengths,
+        source_wavelengths,
+        row_values,
+        left=float(log10_floor),
+        right=float(log10_floor),
+    )
+    return np.maximum(row_values, float(log10_floor))
+
+
 def _accumulate_binned_row(dataset, row_index, wavelength_chunks, target_wavelengths, log10_floor):
     target_size = target_wavelengths.size
     sum_row = np.zeros(target_size, dtype=np.float64)
@@ -253,7 +266,7 @@ def _process_row_block(
     dataset,
     out,
     row_specs,
-    wavelength_chunks,
+    source_wavelengths,
     target_wavelengths,
     log10_floor,
     storage_format,
@@ -278,10 +291,10 @@ def _process_row_block(
             leave=False,
         ) as bar:
             for output_index, source_index in row_specs:
-                row_values = _accumulate_binned_row(
+                row_values = _accumulate_interp_row(
                     dataset,
                     source_index,
-                    wavelength_chunks,
+                    source_wavelengths,
                     target_wavelengths,
                     log10_floor,
                 )
@@ -304,10 +317,10 @@ def _process_row_block(
         leave=False,
     ) as bar:
         for output_index, source_index in row_specs:
-            row_values = _accumulate_binned_row(
+            row_values = _accumulate_interp_row(
                 dataset,
                 source_index,
-                wavelength_chunks,
+                source_wavelengths,
                 target_wavelengths,
                 log10_floor,
             )
@@ -618,9 +631,6 @@ def opacity_dir_to_hdf5(
                 "Requested wavelength range extends beyond the source grid edges; "
                 "bins will be clipped to the available source opacities."
             )
-    wavelength_chunks = _prepare_wavelength_chunks(
-        source_wavelengths, target_bin_edges, target_wavelengths, source_chunk_wavelengths
-    )
 
     available = _discover_opacity_species(opacity_dir)
     molecular_requested = _normalize_species_selection(molecular_species)
@@ -735,7 +745,7 @@ def opacity_dir_to_hdf5(
                     dataset,
                     out,
                     row_specs,
-                    wavelength_chunks,
+                    source_wavelengths,
                     target_wavelengths,
                     molecular_log10_floor,
                     storage_format,
@@ -796,7 +806,7 @@ def opacity_dir_to_hdf5(
                     dataset,
                     out,
                     row_specs,
-                    wavelength_chunks,
+                    source_wavelengths,
                     target_wavelengths,
                     continuum_log10_floor,
                     storage_format,
@@ -1059,10 +1069,10 @@ def opacity_dir_to_correlated_k_hdf5(
                     cont_y_min = np.inf
                     cont_y_max = -np.inf
                     for _, source_index in row_specs:
-                        row_values = _accumulate_binned_row(
+                        row_values = _accumulate_interp_row(
                             dataset,
                             source_index,
-                            wavelength_chunks,
+                            source_wavelengths,
                             target_wavelengths,
                             continuum_log10_floor,
                         )
@@ -1079,7 +1089,7 @@ def opacity_dir_to_correlated_k_hdf5(
                     dataset,
                     out,
                     row_specs,
-                    wavelength_chunks,
+                    source_wavelengths,
                     target_wavelengths,
                     continuum_log10_floor,
                     storage_format,

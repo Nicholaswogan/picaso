@@ -1972,7 +1972,7 @@ def _compute_ck_molecular_taugas(
                 taugas_out[iw, ig, il] = mixed[ig] * total_column
 
 
-@nb.njit(parallel=True, cache=True)
+@nb.njit(cache=True)
 def _add_ck_continuum_species_taugas(
     continuum_table,
     continuum_scale_constant,
