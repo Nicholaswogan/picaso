@@ -1842,7 +1842,7 @@ def _ck_interp_log_table_row(table, p0, p1, t0, t1, pw, tw, iw, out):
 
 
 @nb.njit(cache=True)
-def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix):
+def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix_template):
     mix_t = mix1 + mix2
     ng = gauss_wts.shape[0]
     if mix_t <= 0.0:
@@ -1854,11 +1854,10 @@ def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix):
         for j in range(ng):
             idx = i * ng + j
             kmix[idx] = (mix1 * k1[i] + mix2 * k2[j]) / mix_t
-            wtsmix[idx] = gauss_wts[i] * gauss_wts[j]
 
     sort_indices = np.argsort(kmix, kind="mergesort")
     kmix_sort = np.maximum(kmix[sort_indices], 1.0e-300)
-    wtsmix_sort = wtsmix[sort_indices]
+    wtsmix_sort = wtsmix_template[sort_indices]
     cumulative = np.cumsum(wtsmix_sort)
     x = cumulative / cumulative[-1]
     k1[:] = fast_pow10(np.interp(gauss_pts, x, np.log10(kmix_sort)))
@@ -1892,7 +1891,10 @@ def _compute_ck_molecular_taugas(
     mixed = np.empty(ngauss, dtype=np.float64)
     tmp = np.empty(ngauss, dtype=np.float64)
     kmix = np.empty(ngauss * ngauss, dtype=np.float64)
-    wtsmix = np.empty(ngauss * ngauss, dtype=np.float64)
+    wtsmix_template = np.empty(ngauss * ngauss, dtype=np.float64)
+    for i in range(ngauss):
+        for j in range(ngauss):
+            wtsmix_template[i * ngauss + j] = g_weights[i] * g_weights[j]
 
     for il in range(nlayers):
         total_column = layer_colden[il] / (layer_mubar[il] * AMU_CGS)
@@ -1967,7 +1969,7 @@ def _compute_ck_molecular_taugas(
                         g_points,
                         g_weights,
                         kmix,
-                        wtsmix,
+                        wtsmix_template,
                     )
 
             column = mix_total * total_column
