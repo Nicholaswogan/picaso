@@ -201,23 +201,6 @@ def _select_continuum_row_specs(temperature_indices):
     return [((it_out,), (int(it_src),)) for it_out, it_src in enumerate(temperature_indices)]
 
 
-def _finalize_binned_row(sum_row, count_row, wavelengths, log10_floor):
-    values = np.zeros_like(sum_row, dtype=np.float64)
-    valid = count_row > 0
-    if np.any(valid):
-        np.divide(sum_row, count_row, out=values, where=valid)
-    values = np.maximum(values, float(log10_floor))
-
-    empty = ~valid
-    if np.any(empty) and np.any(valid):
-        values[empty] = np.interp(wavelengths[empty], wavelengths[valid], values[valid])
-        values = np.maximum(values, float(log10_floor))
-    elif not np.any(valid):
-        values.fill(float(log10_floor))
-
-    return values
-
-
 def _prepare_wavelength_chunks(source_wavelengths, target_bin_edges, target_wavelengths, source_chunk_wavelengths):
     chunks = []
     target_lows = target_bin_edges[:, 0]
@@ -256,18 +239,6 @@ def _accumulate_interp_row(dataset, row_index, source_wavelengths, target_wavele
         right=float(log10_floor),
     )
     return np.maximum(row_values, float(log10_floor))
-
-
-def _accumulate_binned_row(dataset, row_index, wavelength_chunks, target_wavelengths, log10_floor):
-    target_size = target_wavelengths.size
-    sum_row = np.zeros(target_size, dtype=np.float64)
-    count_row = np.zeros(target_size, dtype=np.uint32)
-    for w0, w1, valid_indices, bin_ids, bin_counts in wavelength_chunks:
-        raw_block = dataset[(slice(w0, w1),) + row_index]
-        row_values = _decode_log10_opacity_block(raw_block[valid_indices], dataset)
-        sum_row += np.bincount(bin_ids, weights=row_values, minlength=target_size)
-        count_row += bin_counts
-    return _finalize_binned_row(sum_row, count_row, target_wavelengths, log10_floor)
 
 
 def _process_row_block(
