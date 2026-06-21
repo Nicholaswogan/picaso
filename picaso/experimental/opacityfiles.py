@@ -92,6 +92,11 @@ def _build_bin_edges_from_centers(wavelength):
     return bin_edges
 
 
+def _centers_to_widths(wavelength):
+    bin_edges = _build_bin_edges_from_centers(wavelength)
+    return bin_edges[:, 1] - bin_edges[:, 0]
+
+
 def _validate_bin_edges(bin_edges):
     bin_edges = np.asarray(bin_edges, dtype=np.float64)
     if bin_edges.ndim != 2 or bin_edges.shape[1] != 2:
@@ -217,9 +222,11 @@ def _prepare_wavelength_chunks(source_wavelengths, target_bin_edges, target_wave
     chunks = []
     target_lows = target_bin_edges[:, 0]
     target_highs = target_bin_edges[:, 1]
+    source_widths = _centers_to_widths(source_wavelengths)
     for w0 in range(0, source_wavelengths.size, source_chunk_wavelengths):
         w1 = min(w0 + source_chunk_wavelengths, source_wavelengths.size)
         wavelength_chunk = source_wavelengths[w0:w1]
+        width_chunk = source_widths[w0:w1]
         if wavelength_chunk.size == 0:
             continue
         bin_ids = np.searchsorted(target_lows, wavelength_chunk, side="right") - 1
@@ -232,8 +239,9 @@ def _prepare_wavelength_chunks(source_wavelengths, target_bin_edges, target_wave
         if not np.any(valid):
             continue
         bin_ids = bin_ids[valid]
+        width_chunk = width_chunk[valid]
         bin_counts = np.bincount(bin_ids, minlength=target_wavelengths.size).astype(np.uint32)
-        chunks.append((w0, w1, np.flatnonzero(valid), bin_ids, bin_counts))
+        chunks.append((w0, w1, np.flatnonzero(valid), bin_ids, width_chunk, bin_counts))
     return chunks
 
 
@@ -353,7 +361,7 @@ def _accumulate_ck_row(dataset, row_index, wavelength_chunks, target_wavelengths
     sample_chunks = [[] for _ in range(target_size)]
     count_row = np.zeros(target_size, dtype=np.uint32)
 
-    for w0, w1, valid_indices, bin_ids, bin_counts in wavelength_chunks:
+    for w0, w1, valid_indices, bin_ids, width_chunk, bin_counts in wavelength_chunks:
         raw_block = dataset[(slice(w0, w1),) + row_index]
         row_values = _decode_log10_opacity_block(raw_block[valid_indices], dataset)
         if row_values.size == 0:
@@ -363,26 +371,38 @@ def _accumulate_ck_row(dataset, row_index, wavelength_chunks, target_wavelengths
         if row_values.size == 1:
             bin_id = int(bin_ids[0])
             sample_chunks[bin_id].append(
-                np.asarray([np.log10(max(float(row_values[0]), float(log10_floor)))], dtype=np.float64)
+                (
+                    np.asarray([np.log10(max(float(row_values[0]), float(log10_floor)))], dtype=np.float64),
+                    np.asarray([float(width_chunk[0])], dtype=np.float64),
+                )
             )
             continue
 
         split_points = np.flatnonzero(np.diff(bin_ids)) + 1
         unique_bins = bin_ids[np.r_[0, split_points]]
-        for bin_id, values in zip(unique_bins, np.split(row_values, split_points)):
+        for bin_id, values, widths in zip(
+            unique_bins,
+            np.split(row_values, split_points),
+            np.split(width_chunk, split_points),
+        ):
             values = np.log10(np.maximum(np.asarray(values, dtype=np.float64), float(log10_floor)))
-            sample_chunks[int(bin_id)].append(values)
+            widths = np.asarray(widths, dtype=np.float64)
+            sample_chunks[int(bin_id)].append((values, widths))
 
     out_row = np.full((target_size, ng), np.log10(float(log10_floor)), dtype=np.float64)
     for i_bin, chunks in enumerate(sample_chunks):
         if not chunks:
             continue
-        data = np.concatenate(chunks)
-        data.sort()
+        data = np.concatenate([chunk[0] for chunk in chunks])
+        weights = np.concatenate([chunk[1] for chunk in chunks])
+        order = np.argsort(data, kind="mergesort")
+        data = data[order]
+        weights = weights[order]
         if data.size == 1:
             out_row[i_bin, :] = data[0]
             continue
-        x = np.linspace(0.0, 1.0, data.size)
+        x = np.cumsum(weights)
+        x /= x[-1]
         out_row[i_bin, :] = np.interp(g_points, x, data)
 
     return _finalize_ck_row(out_row, count_row, target_wavelengths, np.log10(float(log10_floor)))
