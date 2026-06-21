@@ -1916,6 +1916,8 @@ def _compute_ck_molecular_taugas(
 
         if nspecies == 1:
             table_index = active_table_indices[0]
+            mix_total = layer_mixing_ratios[active_species_indices[0], il]
+            column = mix_total * total_column
             for iw in range(nwavelengths):
                 _ck_interp_log_table_row(
                     molecular_tables[table_index],
@@ -1929,7 +1931,7 @@ def _compute_ck_molecular_taugas(
                     tmp,
                 )
                 for ig in range(ngauss):
-                    taugas_out[iw, ig, il] = tmp[ig] * total_column
+                    taugas_out[iw, ig, il] = tmp[ig] * column
             continue
 
         for iw in range(nwavelengths):
@@ -1968,8 +1970,9 @@ def _compute_ck_molecular_taugas(
                         wtsmix,
                     )
 
+            column = mix_total * total_column
             for ig in range(ngauss):
-                taugas_out[iw, ig, il] = mixed[ig] * total_column
+                taugas_out[iw, ig, il] = mixed[ig] * column
 
 
 @nb.njit(cache=True)
