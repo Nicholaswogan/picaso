@@ -1015,6 +1015,7 @@ class RadtranOpacitiesCK:
 
         # Wavelengths and surface reflectance
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
+        opacities_result.bin_edges[:chunk_width, :] = self.bin_edges[ind_wv0:ind_wv1, :]
         if np.isscalar(surface.reflectance):
             opacities_result.surf_reflect[:chunk_width] = float(surface.reflectance)
         else:
@@ -1529,6 +1530,7 @@ class RadtranOpacities:
 
         # Wavelengths and surface reflectance
         opacities_result.wavelength_um[:chunk_width] = self.wavelength[ind_wv0:ind_wv1]
+        opacities_result.bin_edges[:chunk_width, :] = self.bin_edges[ind_wv0:ind_wv1, :]
         if np.isscalar(surface.reflectance):
             opacities_result.surf_reflect[:chunk_width] = float(surface.reflectance)
         else:
@@ -2196,6 +2198,7 @@ class RadtranOpacitiesResult:
     ngauss : nb.int64
 
     wavelength_um : nb.float64[:]
+    bin_edges : nb.float64[:,:]
     surf_reflect : nb.float64[:]
     ck_weights : nb.float64[:]
     taugas : nb.float64[:,:,:]
@@ -2231,6 +2234,7 @@ class RadtranOpacitiesResult:
         self.nwavelengths_per_chunk = nwavelengths_per_chunk
 
         self.wavelength_um = np.empty(nwavelengths_per_chunk, dtype=np.float64)
+        self.bin_edges = np.empty((nwavelengths_per_chunk, 2), dtype=np.float64)
         self.surf_reflect = np.empty(nwavelengths_per_chunk, dtype=np.float64)
         self.ck_weights = np.ones(ngauss, dtype=np.float64)
         self.taugas = np.empty((nwavelengths_per_chunk, ngauss, nlayers), dtype=np.float64)
@@ -2650,6 +2654,7 @@ class Radtran:
 
         # Save chunk
         self.thermal_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        self.thermal_result.bin_edges[ind_wv0:ind_wv1, :] = self.opacities_result.bin_edges[:chunk_width, :]
         spectrum = self.opacities_result.spectrum[:chunk_width]
         spectrum *= scale_factor
         self.thermal_result.thermal[ind_wv0:ind_wv1] += spectrum
@@ -2705,6 +2710,7 @@ class Radtran:
 
         # Save chunk
         self.reflected_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        self.reflected_result.bin_edges[ind_wv0:ind_wv1, :] = self.opacities_result.bin_edges[:chunk_width, :]
         spectrum = self.opacities_result.spectrum[:chunk_width]
         spectrum *= scale_factor
         self.reflected_result.albedo[ind_wv0:ind_wv1] += spectrum
@@ -2740,6 +2746,7 @@ class Radtran:
 
         # Save chunk
         self.transmission_result.wavelength_um[ind_wv0:ind_wv1] = self.opacities_result.wavelength_um[:chunk_width]
+        self.transmission_result.bin_edges[ind_wv0:ind_wv1, :] = self.opacities_result.bin_edges[:chunk_width, :]
         spectrum = self.opacities_result.spectrum[:chunk_width]
         spectrum *= scale_factor
         self.transmission_result.rprs2[ind_wv0:ind_wv1] += spectrum

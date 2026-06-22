@@ -115,6 +115,7 @@ class ThermalResult:
 
     nwavelengths: nb.int64
     wavelength_um: nb.float64[:] # Wavelengths in microns
+    bin_edges: nb.float64[:,:]
     thermal: nb.float64[:] # Disk-integrated TOA flux in CGS units
     fpfs: nb.float64[:] 
 
@@ -124,6 +125,7 @@ class ThermalResult:
     def _allocate(self, nwavelengths):
         self.nwavelengths = nwavelengths
         self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.bin_edges = np.empty((nwavelengths, 2), dtype=np.float64)
         self.thermal = np.empty(nwavelengths, dtype=np.float64)
         self.fpfs = np.empty(nwavelengths, dtype=np.float64)
 
@@ -438,6 +440,7 @@ class ReflectedResult:
 
     nwavelengths: nb.int64
     wavelength_um: nb.float64[:]
+    bin_edges: nb.float64[:,:]
     albedo: nb.float64[:]
     fpfs: nb.float64[:]
 
@@ -447,6 +450,7 @@ class ReflectedResult:
     def _allocate(self, nwavelengths):
         self.nwavelengths = nwavelengths
         self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.bin_edges = np.empty((nwavelengths, 2), dtype=np.float64)
         self.albedo = np.empty(nwavelengths, dtype=np.float64)
         self.fpfs = np.empty(nwavelengths, dtype=np.float64)
 
@@ -790,6 +794,7 @@ class TransmissionResult:
 
     nwavelengths: nb.int64
     wavelength_um: nb.float64[:]
+    bin_edges: nb.float64[:,:]
     rprs2: nb.float64[:]
 
     def __init__(self):
@@ -798,6 +803,7 @@ class TransmissionResult:
     def _allocate(self, nwavelengths):
         self.nwavelengths = nwavelengths
         self.wavelength_um = np.empty(nwavelengths, dtype=np.float64)
+        self.bin_edges = np.empty((nwavelengths, 2), dtype=np.float64)
         self.rprs2 = np.empty(nwavelengths, dtype=np.float64)
 
     def _ensure(self, nwavelengths):
