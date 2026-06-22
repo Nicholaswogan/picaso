@@ -780,28 +780,28 @@ class RadtranOpacitiesCK:
                 f"opacity_filename must be a string path or Path, got {type(opacity_filename)!r}"
             )
 
-        self.opacity_filename = str(opacity_filename)
-        if not h5py.is_hdf5(self.opacity_filename):
-            raise ValueError(f"{self.opacity_filename!r} is not a valid HDF5 file")
+        opacity_filename = str(opacity_filename)
+        if not h5py.is_hdf5(opacity_filename):
+            raise ValueError(f"{opacity_filename!r} is not a valid HDF5 file")
 
-        self.opacity_cache_size_limit = opacity_cache_size_limit
+        self.opacity_filename = opacity_filename
 
-        with h5py.File(self.opacity_filename, "r") as file:
+        with h5py.File(opacity_filename, "r") as file:
             header = file["header"]
             molecular_group = file["molecular"]
             continuum_group = file["continuum"]
 
-            opacity_type = _read_hdf5_scalar(header, "opacity_type", self.opacity_filename)
+            opacity_type = _read_hdf5_scalar(header, "opacity_type", opacity_filename)
             if str(opacity_type).lower() != "correlated-k":
                 raise ValueError(
-                    f"{self.opacity_filename!r} has opacity_type {opacity_type!r}; "
+                    f"{opacity_filename!r} has opacity_type {opacity_type!r}; "
                     "expected 'correlated-k'"
                 )
 
-            self.storage_format = str(_read_hdf5_scalar(header, "storage_format", self.opacity_filename))
-            if self.storage_format not in {"log10_uint16", "log10_float32"}:
+            storage_format = str(_read_hdf5_scalar(header, "storage_format", opacity_filename))
+            if storage_format not in {"log10_uint16", "log10_float32"}:
                 raise ValueError(
-                    f"unsupported storage_format {self.storage_format!r}; "
+                    f"unsupported storage_format {storage_format!r}; "
                     "expected 'log10_uint16' or 'log10_float32'"
                 )
 
@@ -871,13 +871,12 @@ class RadtranOpacitiesCK:
             self.nmolecular = int(len(molecular_names))
             self.ncontinuum = int(len(continuum_names))
             self.molecular_name_to_index = {name: i for i, name in enumerate(molecular_names)}
-            self.continuum_name_to_index = {name: i for i, name in enumerate(continuum_names)}
 
             self.g_points = g_points
             self.g_weights = g_weights
 
-            self.molecular_unit = str(_read_hdf5_scalar(header, "molecular_unit", self.opacity_filename))
-            self.continuum_unit = str(_read_hdf5_scalar(header, "continuum_unit", self.opacity_filename))
+            molecular_unit = str(_read_hdf5_scalar(header, "molecular_unit", opacity_filename))
+            continuum_unit = str(_read_hdf5_scalar(header, "continuum_unit", opacity_filename))
 
             if self.nmolecular:
                 self.molecular_tables = np.empty(
@@ -895,7 +894,6 @@ class RadtranOpacitiesCK:
             self.continuum_types = []
             self.continuum_primary_species = []
             self.continuum_secondary_species = []
-            self.continuum_opacity_units = []
 
             for i, name in enumerate(self.molecular_names):
                 dataset = molecular_group[name]
@@ -927,15 +925,15 @@ class RadtranOpacitiesCK:
                     dtype=np.float64,
                 )
 
-                continuum_type = str(_read_hdf5_attr_scalar(dataset, "continuum_type", self.opacity_filename)).lower()
-                primary_species = str(_read_hdf5_attr_scalar(dataset, "primary_species", self.opacity_filename))
+                continuum_type = str(_read_hdf5_attr_scalar(dataset, "continuum_type", opacity_filename)).lower()
+                primary_species = str(_read_hdf5_attr_scalar(dataset, "primary_species", opacity_filename))
                 secondary_species = _read_hdf5_attr_scalar(
                     dataset,
                     "secondary_species",
-                    self.opacity_filename,
+                    opacity_filename,
                     default=None,
                 )
-                opacity_unit = str(_read_hdf5_attr_scalar(dataset, "opacity_unit", self.opacity_filename))
+                opacity_unit = str(_read_hdf5_attr_scalar(dataset, "opacity_unit", opacity_filename))
 
                 if continuum_type not in {"cia", "cross_section"}:
                     raise ValueError(
@@ -946,16 +944,13 @@ class RadtranOpacitiesCK:
                 self.continuum_types.append(continuum_type)
                 self.continuum_primary_species.append(primary_species)
                 self.continuum_secondary_species.append(None if secondary_species is None else str(secondary_species))
-                self.continuum_opacity_units.append(opacity_unit)
 
-        if self.nmolecular and self.molecular_unit != "cm2/molecule":
+        if self.nmolecular and molecular_unit != "cm2/molecule":
             raise ValueError(
-                f"unsupported molecular_unit {self.molecular_unit!r}; expected 'cm2/molecule'"
+                f"unsupported molecular_unit {molecular_unit!r}; expected 'cm2/molecule'"
             )
-        if self.ncontinuum and self.continuum_unit == "":
+        if self.ncontinuum and continuum_unit == "":
             raise ValueError("continuum_unit must not be empty when continuum data are present")
-
-        self.opacity_type = "correlated-k"
 
         self.workspace = RadtranOpacitiesWorkspace()
 
@@ -1827,7 +1822,7 @@ def _fill_cross_section_scale_workspace(atmosphere, i_primary_species, workspace
         workspace.continuum_scale[i] = atmosphere.layer_densities[i_primary_species, i] * atmosphere.layer_dz[i]
 
 
-@nb.njit(cache=True)
+@nb.njit
 def _ck_interp_log_table_row(table, p0, p1, t0, t1, pw, tw, iw, out):
     c00 = (1.0 - pw) * (1.0 - tw)
     c10 = pw * (1.0 - tw)
@@ -1843,7 +1838,7 @@ def _ck_interp_log_table_row(table, p0, p1, t0, t1, pw, tw, iw, out):
         )
 
 
-@nb.njit(cache=True)
+@nb.njit
 def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix_template):
     mix_t = mix1 + mix2
     ng = gauss_wts.shape[0]
@@ -1866,7 +1861,7 @@ def _ck_mix_2_gases(k1, k2, mix1, mix2, gauss_pts, gauss_wts, kmix, wtsmix_templ
     return mix_t
 
 
-@nb.njit(cache=True)
+@nb.njit
 def _compute_ck_molecular_taugas(
     molecular_tables,
     active_species_indices,
@@ -1979,7 +1974,7 @@ def _compute_ck_molecular_taugas(
                 taugas_out[iw, ig, il] = mixed[ig] * column
 
 
-@nb.njit(cache=True)
+@nb.njit
 def _add_ck_continuum_species_taugas(
     continuum_table,
     continuum_scale_constant,
