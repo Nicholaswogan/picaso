@@ -45,6 +45,67 @@ def _decode_hdf5_string(value):
     return str(value)
 
 
+def grid_near_resolution(wv_min, wv_max, R):
+    """
+    Build wavelength bin edges spanning ``[wv_min, wv_max]`` at a resolving
+    power as close as practical to ``R``.
+
+    The grid is log-spaced so the bins have approximately constant resolving
+    power across the bandpass, but the final bin is forced to land exactly on
+    ``wv_max`` rather than leaving a tiny leftover bin.
+
+    Parameters
+    ----------
+    wv_min : float
+        Lower wavelength edge.
+    wv_max : float
+        Upper wavelength edge.
+    R : float
+        Target resolving power.
+
+    Returns
+    -------
+    numpy.ndarray
+        Wavelength bin edges.
+    """
+    wv_min = float(wv_min)
+    wv_max = float(wv_max)
+    R = float(R)
+
+    if not np.isfinite(wv_min) or not np.isfinite(wv_max) or not np.isfinite(R):
+        raise ValueError("wv_min, wv_max, and R must be finite")
+    if wv_min <= 0.0 or wv_max <= 0.0:
+        raise ValueError("wv_min and wv_max must be positive")
+    if wv_max <= wv_min:
+        raise ValueError("wv_max must be larger than wv_min")
+    if R <= 0.0:
+        raise ValueError("R must be positive")
+
+    # For a log-spaced grid, the number of bins needed to achieve a resolution
+    # near R is approximately R * ln(wv_max / wv_min). Rounding keeps the grid
+    # close to the requested resolving power while ensuring the last bin is not
+    # artificially tiny.
+    nbin = max(1, int(np.round(R * np.log(wv_max / wv_min))))
+    return np.geomspace(wv_min, wv_max, nbin + 1)
+
+
+def bin_edges_from_wavelength_edges(edges):
+    edges = np.asarray(edges, dtype=np.float64)
+    if edges.ndim != 1:
+        raise ValueError(f"edges must be 1D, got shape {edges.shape}")
+    if edges.size < 2:
+        raise ValueError("at least two wavelength edges are required to build bin_edges")
+    if not np.all(np.isfinite(edges)):
+        raise ValueError("edges must contain only finite values")
+    if np.any(np.diff(edges) <= 0.0):
+        raise ValueError("edges must be strictly increasing")
+
+    bin_edges = np.empty((edges.size - 1, 2), dtype=np.float64)
+    bin_edges[:, 0] = edges[:-1]
+    bin_edges[:, 1] = edges[1:]
+    return bin_edges
+
+
 def _build_constant_r_wavelength_grid(min_wavelength, max_wavelength, constant_r):
     min_wavelength = float(min_wavelength)
     max_wavelength = float(max_wavelength)
