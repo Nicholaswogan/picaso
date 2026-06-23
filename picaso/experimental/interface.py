@@ -3,6 +3,36 @@ import pandas as pd
 
 from . import driver
 
+EXCLUDE_OPACITY_TYPES = ("line", "continuum", "rayleigh")
+
+
+def _convert_legacy_exclude_mol(exclude_mol):
+    """Convert legacy normalized exclusions into the raw experimental request form."""
+    if exclude_mol is None:
+        return None
+
+    if not isinstance(exclude_mol, dict):
+        raise ValueError(
+            "bundle.inputs['atmosphere']['exclude_mol'] must be None or a normalized dict"
+        )
+
+    converted = {}
+    for molecule, flags in exclude_mol.items():
+        if not isinstance(molecule, str):
+            raise ValueError("bundle.inputs['atmosphere']['exclude_mol'] molecule names must be strings")
+        if not isinstance(flags, dict):
+            raise ValueError(
+                "bundle.inputs['atmosphere']['exclude_mol'] must use the legacy normalized dict format"
+            )
+
+        requested_types = [opacity_type for opacity_type in EXCLUDE_OPACITY_TYPES if flags.get(opacity_type, False)]
+        if len(requested_types) == 0:
+            continue
+        converted[molecule] = ["all"] if len(requested_types) == len(EXCLUDE_OPACITY_TYPES) else requested_types
+
+    return converted or None
+
+
 class ExperimentalRT:
 
     def __init__(
@@ -469,7 +499,7 @@ def picaso(
     star = bundle_to_star(bundle)
     settings = bundle_to_settings(bundle)
     phase = bundle_to_phase(bundle)
-
+    exclude_mol = _convert_legacy_exclude_mol(bundle.inputs.get("atmosphere", {}).get("exclude_mol", None))
     # Settings
     opacityclass.rad.settings = settings
     opacityclass.rad.phase = phase
@@ -483,6 +513,7 @@ def picaso(
         star,
         calculation,
         opacityclass.nwavelengths_per_chunk,
+        exclude_mol,
     )
 
     # Return

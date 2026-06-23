@@ -43,6 +43,7 @@ CIA_AMAGAT_TO_MOLECULE_CM = 1.385277e-39
 # Convert number column density to molar column density for legacy Rayleigh parity.
 AVOGADRO = 6.02214076e23
 LOG10 = np.log(10.0)
+EXCLUDE_OPACITY_TYPES = ("line", "continuum", "rayleigh")
 
 
 def separate_molecule_name(molecule_name):
@@ -53,6 +54,78 @@ def separate_molecule_name(molecule_name):
 def separate_string_number(string):
     """Separate a token into alphabetic and numeric parts."""
     return re.findall(r'[A-Za-z]+|\d+', string)
+
+
+def convert_to_simple(iso_name):
+    """Convert an isotopologue name to a simple species name."""
+    separator = "_"
+    if separator not in iso_name:
+        return iso_name
+    separate = [separate_molecule_name(j) for j in iso_name.split("-")]
+    mol = ""
+    for i in separate:
+        if len(i) > 1:
+            mol += i[1]
+        else:
+            mol += i[0]
+    return mol
+
+
+def normalize_exclude_mol(exclude_mol):
+    """Normalize legacy-style opacity exclusions into per-class name sets."""
+    normalized = {opacity_type: set() for opacity_type in EXCLUDE_OPACITY_TYPES}
+    if exclude_mol is None:
+        return normalized
+
+    def _add_name(opacity_type, name):
+        if not isinstance(name, str):
+            raise ValueError("exclude_mol molecule names must be strings")
+        normalized[opacity_type].add(name)
+        normalized[opacity_type].add(convert_to_simple(name))
+
+    def _expand_requested_types(requested_types):
+        if isinstance(requested_types, str):
+            requested_types = [requested_types]
+        elif not isinstance(requested_types, (list, tuple, set)):
+            raise ValueError("exclude_mol dict values must be strings or lists of strings")
+        if len(requested_types) == 0:
+            raise ValueError("exclude_mol dict values cannot be empty")
+
+        expanded = set()
+        for opacity_type in requested_types:
+            if not isinstance(opacity_type, str):
+                raise ValueError("exclude_mol opacity types must be strings")
+            if opacity_type == "all":
+                expanded.update(EXCLUDE_OPACITY_TYPES)
+            elif opacity_type in EXCLUDE_OPACITY_TYPES:
+                expanded.add(opacity_type)
+            else:
+                allowed = ", ".join(EXCLUDE_OPACITY_TYPES + ("all",))
+                raise ValueError(
+                    f"Invalid exclude_mol opacity type '{opacity_type}'. Allowed values are: {allowed}"
+                )
+        return expanded
+
+    if isinstance(exclude_mol, str):
+        for opacity_type in EXCLUDE_OPACITY_TYPES:
+            _add_name(opacity_type, exclude_mol)
+        return normalized
+
+    if isinstance(exclude_mol, (list, tuple, set)):
+        for molecule in exclude_mol:
+            if not isinstance(molecule, str):
+                raise ValueError("exclude_mol molecule names must be strings")
+            for opacity_type in EXCLUDE_OPACITY_TYPES:
+                _add_name(opacity_type, molecule)
+        return normalized
+
+    if isinstance(exclude_mol, dict):
+        for molecule, requested_types in exclude_mol.items():
+            for opacity_type in _expand_requested_types(requested_types):
+                _add_name(opacity_type, molecule)
+        return normalized
+
+    raise ValueError("exclude_mol must be None, a string, a list of strings, or a dict")
 
 
 def get_weights(molecule):
@@ -998,7 +1071,8 @@ class RadtranOpacitiesCK:
         surface: Surface, 
         ind_wv0: int, 
         ind_wv1: int, 
-        opacities_result: RadtranOpacitiesResult
+        opacities_result: RadtranOpacitiesResult,
+        exclude_mol: dict,
     ):  
         # Width of the wavelength chunk
         chunk_width = ind_wv1 - ind_wv0
@@ -1022,6 +1096,8 @@ class RadtranOpacitiesCK:
         active_tables = []
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
+            if species_name in exclude_mol["line"]:
+                continue
             table_index = self.molecular_name_to_index.get(species_name)
             if table_index is None:
                 continue
@@ -1056,12 +1132,16 @@ class RadtranOpacitiesCK:
             continuum_type = self.continuum_types[i_continuum]
             primary_species = self.continuum_primary_species[i_continuum]
             secondary_species = self.continuum_secondary_species[i_continuum]
+            if primary_species in exclude_mol["continuum"]:
+                continue
             if primary_species not in atmosphere_name_to_index:
                 continue
             i_primary = atmosphere_name_to_index[primary_species]
 
             if continuum_type == "cia":
                 if secondary_species is None or secondary_species not in atmosphere_name_to_index:
+                    continue
+                if secondary_species in exclude_mol["continuum"]:
                     continue
                 i_secondary = atmosphere_name_to_index[secondary_species]
                 _fill_continuum_scale_workspace(atmosphere, i_primary, i_secondary, self.workspace)
@@ -1093,6 +1173,8 @@ class RadtranOpacitiesCK:
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in RAYLEIGH_MOLECULES:
+                continue
+            if species_name in exclude_mol["rayleigh"]:
                 continue
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
             _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
@@ -1506,7 +1588,8 @@ class RadtranOpacities:
         surface: Surface, 
         ind_wv0: int, 
         ind_wv1: int, 
-        opacities_result: RadtranOpacitiesResult
+        opacities_result: RadtranOpacitiesResult,
+        exclude_mol: dict,
     ):  
         # Width of the wavelength chunk
         chunk_width = ind_wv1 - ind_wv0
@@ -1552,6 +1635,8 @@ class RadtranOpacities:
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in self.molecular_name_to_index:
                 continue
+            if species_name in exclude_mol["line"]:
+                continue
 
             i_molecular = self.molecular_name_to_index[species_name]
             block = self.workspace.molecular_block
@@ -1591,11 +1676,15 @@ class RadtranOpacities:
 
             if primary_species not in atmosphere_name_to_index:
                 continue
+            if primary_species in exclude_mol["continuum"]:
+                continue
             i_primary = atmosphere_name_to_index[primary_species]
             block = self.workspace.continuum_block
             dataset = self._continuum_group[continuum_name]
             if continuum_type == "cia":
                 if secondary_species is None or secondary_species not in atmosphere_name_to_index:
+                    continue
+                if secondary_species in exclude_mol["continuum"]:
                     continue
                 i_secondary = atmosphere_name_to_index[secondary_species]
                 _fill_continuum_scale_workspace(atmosphere, i_primary, i_secondary, self.workspace)
@@ -1653,6 +1742,8 @@ class RadtranOpacities:
         for i_species in range(atmosphere.nspecies):
             species_name = str(atmosphere.species_names[i_species])
             if species_name not in RAYLEIGH_MOLECULES:
+                continue
+            if species_name in exclude_mol["rayleigh"]:
                 continue
             compute_rayleigh_sigma(species_name, wavelength_chunk, rayleigh_sigma)
             _accumulate_rayleigh_tau(rayleigh_sigma, atmosphere.layer_columns[i_species], tauray)
@@ -2607,7 +2698,7 @@ class Radtran:
         "Prepared interpolation for computing opacities"
         self.opacities.prepare_interpolation(self.atmosphere, self.clouds, self.nwavelengths_per_chunk)
 
-    def _compute_opacity(self, ind_wv0, ind_wv1):
+    def _compute_opacity(self, ind_wv0, ind_wv1, exclude_mol):
         "Compute the opacity of the atmosphere."
         self.opacities.compute_opacity(
             self.atmosphere,
@@ -2617,6 +2708,7 @@ class Radtran:
             ind_wv0,
             ind_wv1,
             self.opacities_result,
+            exclude_mol,
         )
 
     def _adjust_opacity_for_clearsky(self, ind_wv0, ind_wv1):
@@ -2801,6 +2893,7 @@ class Radtran:
         star: Star = None,
         calculation='thermal',
         nwavelengths_per_chunk=10_000,
+        exclude_mol=None,
     ):
 
         if calculation not in ['thermal', 'reflected', 'transmission']:
@@ -2809,6 +2902,8 @@ class Radtran:
             )
         if calculation == 'transmission' and star is None:
             raise ValueError("transmission calculations require a Star with a finite radius")
+
+        exclude_mol = normalize_exclude_mol(exclude_mol)
         
         # Set wavelength chunking
         self._set_wavelength_chunks(nwavelengths_per_chunk)
@@ -2837,7 +2932,7 @@ class Radtran:
             ind_wv1 = min(ind_wv0 + self.nwavelengths_per_chunk, self.opacities.nwavelength)
             
             # Compute opacity for the wavelength chunk
-            self._compute_opacity(ind_wv0, ind_wv1)
+            self._compute_opacity(ind_wv0, ind_wv1, exclude_mol)
 
             # Do the RT for the wavelength chunk
             self._radiate(ind_wv0, ind_wv1, calculation, scale_factor_cloudy)
