@@ -1,7 +1,7 @@
 import numpy as np
 from numpy.testing import assert_allclose
 
-from picaso.experimental_rayleigh import compute_sigma as compute_sigma_new
+from picaso.experimental.rayleigh import compute_sigma as compute_sigma_new
 from picaso.rayleigh import Rayleigh
 
 
