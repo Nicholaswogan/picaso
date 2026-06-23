@@ -1176,6 +1176,7 @@ class RadtranOpacities:
             )
 
         self.pressure = np.asarray(self._header["pressure"][:], dtype=np.float64)
+        self.pressure_log10 = np.log10(self.pressure)
         self.temperature = np.asarray(self._header["temperature"][:], dtype=np.float64)
         wavelength = np.asarray(self._header["wavelength"][:], dtype=np.float64)
         self.continuum_temperatures = np.asarray(self._header["continuum_temperatures"][:], dtype=np.float64)
@@ -1289,6 +1290,7 @@ class RadtranOpacities:
             self.continuum_opacity_units.append(opacity_unit)
 
         self.pressure.flags.writeable = False
+        self.pressure_log10.flags.writeable = False
         self.temperature.flags.writeable = False
         self.wavelength.flags.writeable = False
         self.bin_edges.flags.writeable = False
@@ -1325,7 +1327,7 @@ class RadtranOpacities:
 
         _fill_molecular_interpolation_workspace(
             atmosphere,
-            self.pressure,
+            self.pressure_log10,
             self.temperature,
             self.workspace,
         )
@@ -1773,14 +1775,14 @@ def _get_or_create_continuum_temp(it, workspace):
 
 
 @nb.njit
-def _fill_molecular_interpolation_workspace(atmosphere, pressure_grid, temperature_grid, workspace):
+def _fill_molecular_interpolation_workspace(atmosphere, pressure_log10_grid, temperature_grid, workspace):
     nlayers = atmosphere.nlayers
     workspace.molecular_npairs = 0
     for ip in range(workspace.npressure):
         for it in range(workspace.ntemperature):
             workspace.molecular_pair_map[ip, it] = -1
     for i in range(nlayers):
-        ip0, ip1, pw = _bracket_1d(pressure_grid, atmosphere.layer_pressures_cgs[i]/1.0e6)
+        ip0, ip1, pw = _bracket_1d(pressure_log10_grid, np.log10(atmosphere.layer_pressures_cgs[i] / 1.0e6))
         it0, it1, tw = _bracket_1d(temperature_grid, atmosphere.layer_temperatures[i])
 
         workspace.molecular_pressure_ind0[i] = _get_or_create_molecular_pair(ip0, it0, workspace)
@@ -2627,7 +2629,7 @@ class Radtran:
         # RT
         get_thermal_1d(
             self.thermal,
-            self.atmosphere.nlayers,
+            self.atmosphere.nlayers + 1,
             chunk_width,
             self.opacities_result.ngauss,
             self.phase.ubar1.shape[0],
@@ -2666,7 +2668,7 @@ class Radtran:
         # RT
         get_reflected_1d(
             self.reflected,
-            self.atmosphere.nlayers,
+            self.atmosphere.nlayers + 1,
             chunk_width,
             self.opacities_result.ngauss,
             self.phase.effective_numg,
