@@ -860,6 +860,7 @@ class RadtranOpacitiesCK:
             self.ngauss = int(g_points.size)
 
             self.pressure = pressure
+            self.pressure_log10 = np.log10(pressure)
             self.temperature = temperature
             self.continuum_temperatures = continuum_temperatures
             self.npressure = int(pressure.size)
@@ -978,7 +979,7 @@ class RadtranOpacitiesCK:
 
         _fill_molecular_interpolation_workspace(
             atmosphere,
-            self.pressure,
+            self.pressure_log10,
             self.temperature,
             self.workspace,
         )
