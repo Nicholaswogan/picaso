@@ -2460,18 +2460,48 @@ class RadtranAtmosphere:
             iref = nlevels - 1
 
         for i in range(iref, nlevels - 1):
+            if (not np.isfinite(self.level_z[i])) or self.level_z[i] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup encountered a non-finite or non-positive "
+                    f"altitude while integrating upward at level {i}: z={self.level_z[i]}"
+                )
             gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
+            if (not np.isfinite(gravity_work[i])) or gravity_work[i] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup encountered a non-finite or non-positive "
+                    f"gravity while integrating upward at level {i}: g={gravity_work[i]}"
+                )
             self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
             delta_logp = np.log(self.level_pressures_cgs[i + 1] / self.level_pressures_cgs[i])
             self.level_dz[i] = self.level_scale_height[i] * delta_logp
             self.level_z[i + 1] = self.level_z[i] - self.level_dz[i]
+            if (not np.isfinite(self.level_z[i + 1])) or self.level_z[i + 1] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup produced a non-finite or non-positive "
+                    f"altitude while integrating upward at level {i + 1}: z={self.level_z[i + 1]}"
+                )
 
         for i in range(iref, 0, -1):
+            if (not np.isfinite(self.level_z[i])) or self.level_z[i] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup encountered a non-finite or non-positive "
+                    f"altitude while integrating downward at level {i}: z={self.level_z[i]}"
+                )
             gravity_work[i] = G_CGS * planet_mass / (self.level_z[i] * self.level_z[i])
+            if (not np.isfinite(gravity_work[i])) or gravity_work[i] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup encountered a non-finite or non-positive "
+                    f"gravity while integrating downward at level {i}: g={gravity_work[i]}"
+                )
             self.level_scale_height[i] = KB_CGS * self.level_temperatures[i] / (self.level_mubar[i] * AMU_CGS * gravity_work[i])
             delta_logp = np.log(self.level_pressures_cgs[i] / self.level_pressures_cgs[i - 1])
             self.level_dz[i] = self.level_scale_height[i] * delta_logp
             self.level_z[i - 1] = self.level_z[i] + self.level_dz[i]
+            if (not np.isfinite(self.level_z[i - 1])) or self.level_z[i - 1] <= 0.0:
+                raise ValueError(
+                    "RadtranAtmosphere.setup produced a non-finite or non-positive "
+                    f"altitude while integrating downward at level {i - 1}: z={self.level_z[i - 1]}"
+                )
 
         # Populate the layer gravity using the same ordering as the legacy code:
         # it is computed before the endpoint gravity values are filled.
