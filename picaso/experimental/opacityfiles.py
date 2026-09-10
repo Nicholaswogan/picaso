@@ -1172,6 +1172,25 @@ def _continuum_metadata_from_source_name(source_name, continuum_unit):
     }
 
 
+def _hdf5_chunk_shape(chunks, data_shape):
+    """Adapt a shared opacity chunk specification to one dataset shape."""
+    ndim = len(data_shape)
+    if isinstance(chunks, int):
+        return (1,) * (ndim - 1) + (min(int(chunks), data_shape[-1]),)
+
+    chunks = tuple(chunks)
+    if len(chunks) == ndim:
+        return tuple(min(int(c), int(s)) for c, s in zip(chunks, data_shape))
+    if ndim == 3 and len(chunks) == 2:
+        chunks = (1,) + chunks
+        return tuple(min(int(c), int(s)) for c, s in zip(chunks, data_shape))
+    if ndim == 2 and len(chunks) == 3:
+        # Continuum blocks have no molecular pressure axis.
+        chunks = chunks[1:]
+        return tuple(min(int(c), int(s)) for c, s in zip(chunks, data_shape))
+    raise ValueError(f"Unsupported chunks specification {chunks!r} for array with ndim={ndim}")
+
+
 def convert_sqlite_to_hdf5(
     input_db,
     output_hdf5,
@@ -1222,17 +1241,6 @@ def convert_sqlite_to_hdf5(
         raise ValueError(f"Unsupported storage_format: {storage_format!r}")
 
     sqlite3.register_converter("array", lambda text: np.load(io.BytesIO(text), allow_pickle=False))
-
-    def _get_chunks(ndim, data_shape):
-        if isinstance(chunks, int):
-            return (1,) * (ndim - 1) + (min(int(chunks), data_shape[-1]),)
-        if len(chunks) == ndim:
-            return tuple(min(int(c), int(s)) for c, s in zip(chunks, data_shape))
-        if ndim == 3 and len(chunks) == 2:
-            return (min(1, data_shape[0]), min(int(chunks[0]), data_shape[1]), min(int(chunks[1]), data_shape[2]))
-        if ndim == 2 and len(chunks) == 2:
-            return tuple(min(int(c), int(s)) for c, s in zip(chunks, data_shape))
-        raise ValueError(f"Unsupported chunks specification {chunks!r} for array with ndim={ndim}")
 
     conn = sqlite3.connect(str(input_db), detect_types=sqlite3.PARSE_DECLTYPES)
     try:
@@ -1328,7 +1336,10 @@ def convert_sqlite_to_hdf5(
                     header.create_dataset("pressure", data=base_pressures.astype(np.float64))
                     header.create_dataset("temperature", data=base_temperatures.astype(np.float64))
                     header.create_dataset("wavelength", data=(1.0e4 / wavenumber_grid)[wl_sort].astype(np.float64))
-                    molecular_chunks = _get_chunks(3, (base_pressures.size, base_temperatures.size, base_nw))
+                    molecular_chunks = _hdf5_chunk_shape(
+                        chunks,
+                        (base_pressures.size, base_temperatures.size, base_nw),
+                    )
                 else:
                     if nw != base_nw:
                         raise RuntimeError(
@@ -1421,7 +1432,10 @@ def convert_sqlite_to_hdf5(
                     header.create_dataset(
                         "continuum_temperatures", data=continuum_temperature_grid.astype(np.float64)
                     )
-                    continuum_chunks = _get_chunks(2, (continuum_temperature_grid.size, base_nw))
+                    continuum_chunks = _hdf5_chunk_shape(
+                        chunks,
+                        (continuum_temperature_grid.size, base_nw),
+                    )
                 elif not np.array_equal(unique_temperatures, continuum_temperature_grid):
                     raise RuntimeError(
                         f"Continuum species {continuum_name!r} uses a different temperature grid than the other continuum tables."

@@ -18,6 +18,7 @@ from picaso import fluxes
 from picaso import fluxes_noalloc
 from picaso import experimental
 from picaso.experimental import fluxes as experimental_fluxes
+from picaso.experimental import opacityfiles as experimental_opacityfiles
 from picaso.experimental import raman as experimental_raman
 
 
@@ -681,3 +682,10 @@ def test_raman_mode_1_parity_with_legacy_pollack():
 
     assert actual.shape == wavelength.shape
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-15)
+
+
+def test_hdf5_chunk_shape_adapts_molecular_chunks_for_continuum():
+    chunks = (1, 1, 4096)
+
+    assert experimental_opacityfiles._hdf5_chunk_shape(chunks, (20, 30, 60718)) == chunks
+    assert experimental_opacityfiles._hdf5_chunk_shape(chunks, (30, 60718)) == (1, 4096)
